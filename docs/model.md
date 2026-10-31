@@ -5,7 +5,7 @@ and what we learned getting here.
 
 ## What ships
 
-One file, `data/skill_model.bin` (~2.3 MB, see [Bundle format](#bundle-format)), embedded in the app. It holds:
+One file, `data/skill_model.bin` (~2.4 MB, see [Bundle format](#bundle-format)), embedded in the app. It holds:
 
 | Part | Input | Output | Used for |
 |---|---|---|---|
@@ -20,7 +20,7 @@ Everything runs in the browser in a fraction of a second; there is no neural net
 ### 1. Per-player stats (`crates/feature_extractor`)
 
 `compute_player_match_stats` reads every live frame (goal replays skipped) and summarises each
-player in **88 numbers**, all measured from that player's own side of the field, plus the
+player in **91 numbers**, all measured from that player's own side of the field, plus the
 playlist's team size (`players_per_team`, see [Playlists](#playlists)):
 
 - **movement** — speed, supersonic / slow time, ground / air / wall time, jumps
@@ -34,6 +34,9 @@ playlist's team size (`players_per_team`, see [Playlists](#playlists)):
   dribbles and flicks, air dribbles, double taps, wall and flip touches, power shots,
   50/50s and their win rate, bumps inflicted / received, teammate bumps
 - **plays** — demos inflicted, kickoff first touches and wins, double commits
+- **throwing** — own goals, lost by forfeit, and forfeited while level or ahead on goals
+  (the header's `bForfeit`, and the winner from `WinningTeam` or the recorder's
+  "Win" / "Loss" replay name)
 - **situational positioning** — last back / goal-side *while defending*, overcommitting,
   shadow defence, support spacing, getting back after a touch
 
@@ -261,16 +264,16 @@ replays), which no part of training sees. Labels are account ranks at match time
 
 | Metric | Meaning | Duels | Doubles | Standard |
 |---|---|---|---|---|
-| player RMSE | whole-match error per player | 174 | 113 | **102** |
-| lobby RMSE | error of the lobby's average | 173 | 105 | **89** |
-| within_r | correlation of predicted vs true *gaps to the lobby* (0 = no signal) | 0.24 | 0.37 | **0.54** |
-| concordance | share of lobbymate pairs (>25 MMR apart) ordered correctly (0.5 = chance) | 0.61 | 0.69 | **0.66** |
+| player RMSE | whole-match error per player | 178 | 115 | **102** |
+| lobby RMSE | error of the lobby's average | 177 | 107 | **90** |
+| within_r | correlation of predicted vs true *gaps to the lobby* (0 = no signal) | 0.29 | 0.39 | **0.54** |
+| concordance | share of lobbymate pairs (>25 MMR apart) ordered correctly (0.5 = chance) | 0.65 | 0.71 | **0.65** |
 
 Duels and doubles are scored on 400 to 800 players, so their within_r carries ±0.05; over
 three seeds duels within_r is 0.23 ± 0.05 (`compare_stat_sets`).
 
-The smurf flag ([section 5](#5-smurf-flag-cratesskill_modelsrcsmurfrs)) fires on 6.8 % of
-duels players, 7.1 % of doubles and 5.4 % of standard. Labels cannot confirm a real smurf
+The smurf flag ([section 5](#5-smurf-flag-cratesskill_modelsrcsmurfrs)) fires on 7.5 % of
+duels players, 7.2 % of doubles and 5.5 % of standard. Labels cannot confirm a real smurf
 (their label is the smurf account's), so it was chosen with `smurf_signals_experiment`
 against two references, at about the shipped flag rate:
 
@@ -324,6 +327,12 @@ tree model replaced it in October 2026. What is worth remembering:
   above its own listed range (1,883 to 2,000); the trees predicted SSLs 400 to 600 MMR lower
   and those few players dominated the duels error. Labelling SSL at 1,941 cut duels lobby
   RMSE from 196 to 170.
+
+- **Deranking shows in forfeits.** Forfeiting while level or ahead on goals happens to
+  12 % of Bronze duelists and 6 % of Bronze doubles players, under 1 % from Diamond up, and
+  those players do speed flips, wavedashes, flip resets and double taps 2 to 10 times as
+  often as others at their rank. A plain loss by forfeit is common at every rank (10 to
+  20 %). Adding the forfeit stats lifted duels within_r from 0.24 to 0.29 in one run.
 
 ## Ideas not tried yet
 

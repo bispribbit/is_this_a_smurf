@@ -1,8 +1,8 @@
 //! Per-player, whole-match summary statistics.
 //!
-//! These are the inputs of the skill model (see `docs/model.md`): 88 hand-written stats per
+//! These are the inputs of the skill model (see `docs/model.md`): 91 hand-written stats per
 //! player, covering movement, boost, positioning, ball control, mechanics (speed flips,
-//! half flips, wavedashes, flip resets, dribbles, double taps, 50/50s, bumps, ...), the scoreboard
+//! half flips, wavedashes, flip resets, dribbles, double taps, 50/50s, bumps, ...), forfeits and own goals, the scoreboard
 //! and situational positioning, plus the playlist's team size.
 //!
 //! Everything positional is measured in the **team-canonical frame** (own goal at `−y`),
@@ -107,15 +107,18 @@ pub const MATCH_STAT_NAMES: [&str; MATCH_STAT_COUNT] = [
     "bumps_inflicted_per_minute",
     "bumps_received_per_minute",
     "teammate_bumps_per_minute",
+    "own_goals",
+    "lost_by_forfeit",
+    "forfeited_level_or_ahead",
     "players_per_team",
 ];
 
 /// Number of stats per player.
-pub const MATCH_STAT_COUNT: usize = 89;
+pub const MATCH_STAT_COUNT: usize = 92;
 
 /// Index of `players_per_team` in [`MATCH_STAT_NAMES`]: the playlist's team size (1, 2 or
 /// 3), the same for every player. It lets one model serve duels, doubles and standard.
-pub const PLAYERS_PER_TEAM_STAT: usize = 88;
+pub const PLAYERS_PER_TEAM_STAT: usize = 91;
 
 /// One player's stats over one match, in [`MATCH_STAT_NAMES`] order.
 #[derive(Debug, Clone, PartialEq)]
@@ -353,6 +356,11 @@ struct Accumulator {
     bumps_inflicted: u32,
     bumps_received: u32,
     teammate_bumps: u32,
+    own_goals: u32,
+    /// The player's team lost by forfeit (whole matches only).
+    lost_by_forfeit: bool,
+    /// ... while level or ahead on goals: a deliberate throw.
+    forfeited_level_or_ahead: bool,
 }
 
 fn length(vector: &Vector3) -> f32 {
@@ -450,15 +458,40 @@ pub fn compute_player_window_stats(
     // Time of the last bump between each pair of slots (bumper, bumped).
     let mut last_bump_time = [[f32::NEG_INFINITY; TOTAL_SLOTS]; TOTAL_SLOTS];
 
-    for goal in parsed
-        .goals
-        .iter()
-        .filter(|goal| frames.contains(&goal.frame))
-    {
+    // Goals per team (blue attacks +y), counted from where the ball went in so own goals
+    // land on the right side.
+    let mut team_goals = [0u32; 2];
+    for goal in &parsed.goals {
+        let Some(ball_y) = parsed
+            .frames
+            .get(goal.frame)
+            .map(|frame| frame.ball.position.y)
+        else {
+            continue;
+        };
+        if let Some(points) = team_goals.get_mut(usize::from(ball_y < 0.0)) {
+            *points += 1;
+        }
+        if !frames.contains(&goal.frame) {
+            continue;
+        }
         if let Some(&slot) = slot_by_name.get(goal.player_name.as_str())
             && let Some(accumulator) = accumulators.get_mut(slot)
         {
             accumulator.goals += 1;
+            accumulator.own_goals += u32::from(team_sign(slot) * ball_y < 0.0);
+        }
+    }
+    if whole_match && parsed.outcome.forfeit {
+        for (slot, accumulator) in accumulators.iter_mut().enumerate() {
+            let team = usize::from(slot >= SLOTS_PER_TEAM);
+            let won = parsed
+                .outcome
+                .winning_team
+                .map(|winner| usize::from(u8::from(winner)) == team);
+            accumulator.lost_by_forfeit = won == Some(false);
+            accumulator.forfeited_level_or_ahead =
+                accumulator.lost_by_forfeit && team_goals.get(team) >= team_goals.get(1 - team);
         }
     }
 
@@ -1549,6 +1582,9 @@ fn finish(
         per_minute(f64::from(accumulator.bumps_inflicted)),
         per_minute(f64::from(accumulator.bumps_received)),
         per_minute(f64::from(accumulator.teammate_bumps)),
+        accumulator.own_goals as f32,
+        f32::from(u8::from(accumulator.lost_by_forfeit)),
+        f32::from(u8::from(accumulator.forfeited_level_or_ahead)),
         players_per_team as f32,
     ];
     Some(PlayerMatchStats {

@@ -261,6 +261,18 @@ pub struct ParsedReplay {
     pub header_player_stats: Vec<HeaderPlayerStats>,
     /// Team size and queue.
     pub match_format: MatchFormat,
+    /// How the match ended.
+    pub outcome: MatchOutcome,
+}
+
+/// How a match ended, from the replay header.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MatchOutcome {
+    /// A team forfeited (`bForfeit`).
+    pub forfeit: bool,
+    /// The winning team: the header's `WinningTeam`, or else the recorder's team
+    /// (`PrimaryPlayerTeam`) and the "Win" / "Loss" ending of the default replay name.
+    pub winning_team: Option<Team>,
 }
 
 /// One player's end-of-match scoreboard line from the replay header (`PlayerStats`).

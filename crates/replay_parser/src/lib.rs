@@ -10,7 +10,7 @@ use std::sync::Arc;
 use boxcars::{Attribute, HeaderProp, ParserBuilder, Replay};
 use replay_structs::{
     ActorState, BallState, DemolitionEvent, GameFrame, GoalEvent, HeaderPlayerStats, MatchFormat,
-    ParsedReplay, PlayerState, Team, UnsupportedReplayMatch,
+    MatchOutcome, ParsedReplay, PlayerState, Team, UnsupportedReplayMatch,
 };
 
 pub mod match_validation;
@@ -718,7 +718,47 @@ fn parse_boxcars_replay(replay: &Replay) -> anyhow::Result<ParsedReplay> {
         kickoff_frames,
         header_player_stats: extract_header_player_stats(replay),
         match_format: MatchFormat::default(),
+        outcome: extract_outcome(replay),
     })
+}
+
+/// Forfeit flag and winning team from the header. Replays saved after the match carry
+/// `WinningTeam`; most others keep the default name ending in "Win" or "Loss" from the
+/// recorder's side, whose team is `PrimaryPlayerTeam`.
+fn extract_outcome(replay: &Replay) -> MatchOutcome {
+    let property = |key: &str| {
+        replay
+            .properties
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value)
+    };
+    let integer = |key: &str| match property(key) {
+        Some(HeaderProp::Int(value)) => Some(*value),
+        _ => None,
+    };
+    let forfeit = matches!(property("bForfeit"), Some(HeaderProp::Bool(true)));
+    let from_name = || {
+        let Some(HeaderProp::Str(name)) = property("ReplayName") else {
+            return None;
+        };
+        let recorder = Team::from(integer("PrimaryPlayerTeam")?);
+        let other = match recorder {
+            Team::Blue => Team::Orange,
+            Team::Orange => Team::Blue,
+        };
+        if name.ends_with(" Win") {
+            Some(recorder)
+        } else if name.ends_with(" Loss") {
+            Some(other)
+        } else {
+            None
+        }
+    };
+    MatchOutcome {
+        forfeit,
+        winning_team: integer("WinningTeam").map(Team::from).or_else(from_name),
+    }
 }
 
 fn extract_goals(replay: &Replay) -> Vec<GoalEvent> {
@@ -918,6 +958,22 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The recorder (orange) forfeited a 1-1 duel: their replay is named "... Loss".
+    #[test]
+    fn forfeit_and_winner_come_from_the_header() {
+        let path =
+            Path::new("../../test_data/ranked-duels-a9feb907-75e9-4514-b52f-44766e0374f1.replay");
+        let parsed = parse_replay_from_bytes(&std::fs::read(path).expect("test replay exists"))
+            .expect("test replay parses");
+        assert_eq!(
+            parsed.outcome,
+            MatchOutcome {
+                forfeit: true,
+                winning_team: Some(Team::Blue),
+            }
+        );
     }
 
     #[test]
