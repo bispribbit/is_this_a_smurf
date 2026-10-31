@@ -337,6 +337,11 @@ pub const OPPONENT_INDEPENDENT_STATS: &[&str] = &[
     "mean_absolute_steer",
     "mean_air_angular_speed",
     "fast_aerial_fraction",
+    "speed_flips_per_minute",
+    "half_flips_per_minute",
+    "wavedashes_per_minute",
+    "flip_resets_per_minute",
+    "ceiling_touches_per_minute",
     "players_per_team",
 ];
 

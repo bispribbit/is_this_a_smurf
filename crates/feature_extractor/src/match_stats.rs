@@ -1,7 +1,8 @@
 //! Per-player, whole-match summary statistics.
 //!
-//! These are the inputs of the skill model (see `docs/model.md`): 71 hand-written stats per
-//! player, covering movement, boost, positioning, ball control, mechanics, the scoreboard
+//! These are the inputs of the skill model (see `docs/model.md`): 88 hand-written stats per
+//! player, covering movement, boost, positioning, ball control, mechanics (speed flips,
+//! half flips, wavedashes, flip resets, dribbles, double taps, 50/50s, bumps, ...), the scoreboard
 //! and situational positioning, plus the playlist's team size.
 //!
 //! Everything positional is measured in the **team-canonical frame** (own goal at `−y`),
@@ -89,15 +90,32 @@ pub const MATCH_STAT_NAMES: [&str; MATCH_STAT_COUNT] = [
     "shadow_defense_fraction",
     "support_spacing_fraction",
     "goal_side_after_touch_fraction",
+    "speed_flips_per_minute",
+    "half_flips_per_minute",
+    "wavedashes_per_minute",
+    "flip_resets_per_minute",
+    "ceiling_touches_per_minute",
+    "dribble_fraction",
+    "flicks_per_minute",
+    "air_dribble_touches_per_minute",
+    "double_taps_per_minute",
+    "wall_touch_fraction",
+    "flip_touch_fraction",
+    "power_shots_per_minute",
+    "fifty_fifties_per_minute",
+    "fifty_fifty_win_fraction",
+    "bumps_inflicted_per_minute",
+    "bumps_received_per_minute",
+    "teammate_bumps_per_minute",
     "players_per_team",
 ];
 
 /// Number of stats per player.
-pub const MATCH_STAT_COUNT: usize = 72;
+pub const MATCH_STAT_COUNT: usize = 89;
 
 /// Index of `players_per_team` in [`MATCH_STAT_NAMES`]: the playlist's team size (1, 2 or
 /// 3), the same for every player. It lets one model serve duels, doubles and standard.
-pub const PLAYERS_PER_TEAM_STAT: usize = 71;
+pub const PLAYERS_PER_TEAM_STAT: usize = 88;
 
 /// One player's stats over one match, in [`MATCH_STAT_NAMES`] order.
 #[derive(Debug, Clone, PartialEq)]
@@ -129,6 +147,100 @@ const TOUCH_MINIMUM_VELOCITY_CHANGE: f32 = 250.0;
 const TOUCH_MAXIMUM_DISTANCE: f32 = 260.0;
 /// Frame durations are clamped so a stalled network frame cannot dominate a time average.
 const MAXIMUM_FRAME_SECONDS: f32 = 0.1;
+/// Car height above which a car is on the ceiling (the ceiling is at 2044).
+const CEILING_HEIGHT: f32 = 1980.0;
+/// Highest car a speed flip or a half flip starts from.
+const LOW_DODGE_MAXIMUM_HEIGHT: f32 = 120.0;
+/// Jump-to-dodge delay below which a boosting diagonal front flip is a speed flip.
+const SPEED_FLIP_FOLLOW_UP_SECONDS: f32 = 0.2;
+const SPEED_FLIP_MINIMUM_SPEED: f32 = 1000.0;
+/// Seconds after a back flip within which facing the other way makes it a half flip.
+const HALF_FLIP_SECONDS: f32 = 1.2;
+/// Forward-vector dot product below which the car has turned around.
+const TURNED_AROUND_DOT: f32 = -0.7;
+/// Airborne time before a landing dodge counts as a wavedash rather than a jump and flip.
+const WAVEDASH_MINIMUM_AIRBORNE_SECONDS: f32 = 0.3;
+/// Car-to-ball distance at which an airborne car can put its wheels on the ball.
+const FLIP_RESET_BALL_DISTANCE: f32 = 200.0;
+/// The ball sits on the car's roof: its height over the car, its horizontal offset, and
+/// how high the car itself may be.
+const DRIBBLE_MINIMUM_RELATIVE_HEIGHT: f32 = 90.0;
+const DRIBBLE_MAXIMUM_RELATIVE_HEIGHT: f32 = 220.0;
+const DRIBBLE_MAXIMUM_HORIZONTAL_DISTANCE: f32 = 120.0;
+const DRIBBLE_MAXIMUM_CAR_HEIGHT: f32 = 150.0;
+/// Carry time before a dodge counts as a flick.
+const FLICK_MINIMUM_CARRY_SECONDS: f32 = 0.4;
+/// Two aerial touches by the same player this close together are an air dribble.
+const AIR_DRIBBLE_SECONDS: f32 = 1.0;
+/// Ball past this canonical y and above this height is on the opponents' backboard (the
+/// goal is 642 high).
+const BACKBOARD_Y: f32 = 4900.0;
+const BACKBOARD_MINIMUM_HEIGHT: f32 = 700.0;
+/// Seconds from the first touch within which a touch off the backboard is a double tap.
+const DOUBLE_TAP_SECONDS: f32 = 3.0;
+/// A touch this soon after the car's dodge started is a flip touch.
+const FLIP_TOUCH_SECONDS: f32 = 0.3;
+/// Ball speed after a touch that makes it a power shot (~100 km/h).
+const POWER_SHOT_SPEED: f32 = 2800.0;
+/// An opponent this close to the ball when it is touched makes the touch a 50/50.
+const FIFTY_FIFTY_DISTANCE: f32 = 300.0;
+/// Seconds after a 50/50 at which the ball's side of the contact point decides who won it.
+const FIFTY_FIFTY_OUTCOME_SECONDS: f32 = 1.0;
+
+/// Centre-to-centre distance at which two cars are touching (a car is ~120 long).
+const BUMP_DISTANCE: f32 = 180.0;
+/// Velocity change in one frame that makes a car-to-car contact a bump.
+const BUMP_MINIMUM_VELOCITY_CHANGE: f32 = 400.0;
+/// Contacts between the same two cars closer together than this are one bump.
+const BUMP_REPEAT_SECONDS: f32 = 1.0;
+
+/// A horizontal unit direction.
+#[derive(Debug, Clone, Copy)]
+struct HorizontalDirection {
+    x: f32,
+    y: f32,
+}
+
+/// A back flip waiting to see whether the car turns around (a half flip).
+#[derive(Debug, Clone, Copy)]
+struct PendingHalfFlip {
+    seconds_left: f32,
+    forward: HorizontalDirection,
+}
+
+/// Per-car state of the mechanics that span several frames.
+#[derive(Debug, Clone, Copy, Default)]
+struct MechanicsState {
+    seconds_airborne: f32,
+    /// Double jumps and dodges since the car last touched a surface.
+    flips_since_surface: u32,
+    /// Whether the car came within wheel reach of the ball since it left a surface.
+    near_ball_since_surface: bool,
+    half_flip: Option<PendingHalfFlip>,
+    carrying_seconds: f32,
+    on_ceiling: bool,
+    seconds_since_dodge: Option<f32>,
+}
+
+/// The last touch of the ball, for air dribbles and double taps.
+#[derive(Debug, Clone, Copy)]
+struct LastTouch {
+    slot: usize,
+    time: f32,
+    /// Car and ball both in the air.
+    aerial: bool,
+    /// The ball reached the opponents' backboard since.
+    off_backboard: bool,
+}
+
+/// A 50/50 waiting for its outcome.
+#[derive(Debug, Clone, Copy)]
+struct PendingFiftyFifty {
+    time: f32,
+    ball_y: f32,
+    toucher: usize,
+    opponent: usize,
+}
 
 #[derive(Debug, Clone, Copy, Default)]
 struct PreviousCarState {
@@ -141,6 +253,8 @@ struct PreviousCarState {
     dodging: bool,
     /// Seconds since the last jump press, for flip timing.
     seconds_since_jump: f32,
+    mechanics: MechanicsState,
+    velocity: Vector3,
 }
 
 /// Time-weighted and count accumulators for one player.
@@ -218,6 +332,23 @@ struct Accumulator {
     support_spacing: f64,
     recovery_touches: u32,
     recovered_goal_side: u32,
+    speed_flips: u32,
+    half_flips: u32,
+    wavedashes: u32,
+    flip_resets: u32,
+    ceiling_touches: u32,
+    dribble: f64,
+    flicks: u32,
+    air_dribble_touches: u32,
+    double_taps: u32,
+    wall_touches: u32,
+    flip_touches: u32,
+    power_shots: u32,
+    fifty_fifties: u32,
+    fifty_fifty_wins: u32,
+    bumps_inflicted: u32,
+    bumps_received: u32,
+    teammate_bumps: u32,
 }
 
 fn length(vector: &Vector3) -> f32 {
@@ -244,11 +375,30 @@ fn up_z(rotation: &Quaternion) -> f32 {
     )
 }
 
+/// Horizontal direction the car's nose points, or `None` when it points (nearly) straight
+/// up or down.
+fn horizontal_forward(rotation: &Quaternion) -> Option<HorizontalDirection> {
+    let x = 2.0f32.mul_add(
+        -rotation.y.mul_add(rotation.y, rotation.z * rotation.z),
+        1.0,
+    );
+    let y = 2.0 * rotation.x.mul_add(rotation.y, rotation.w * rotation.z);
+    let length = x.hypot(y);
+    (length > 0.3).then(|| HorizontalDirection {
+        x: x / length,
+        y: y / length,
+    })
+}
+
 /// One present, live car in the current frame.
 #[derive(Debug, Clone, Copy)]
 struct LiveCar {
     slot: usize,
     position: Vector3,
+    velocity: Vector3,
+    /// Size of the velocity change since the previous frame (0 on the car's first frame).
+    velocity_change: f32,
+    on_wall: bool,
     canonical_y: f32,
     distance_to_ball: f32,
 }
@@ -291,6 +441,10 @@ pub fn compute_player_window_stats(
     let mut last_demolition_time: HashMap<i32, f32> = HashMap::new();
     // Time of each player's last touch while waiting to see them get back goal-side.
     let mut pending_recovery: [Option<f32>; TOTAL_SLOTS] = [None; TOTAL_SLOTS];
+    let mut last_touch: Option<LastTouch> = None;
+    let mut pending_fifty_fifty: Option<PendingFiftyFifty> = None;
+    // Time of the last bump between each pair of slots (bumper, bumped).
+    let mut last_bump_time = [[f32::NEG_INFINITY; TOTAL_SLOTS]; TOTAL_SLOTS];
 
     for goal in parsed
         .goals
@@ -314,6 +468,8 @@ pub fn compute_player_window_stats(
         if excluded.contains(&frame_index) {
             previous_ball_velocity = None;
             previous = [PreviousCarState::default(); TOTAL_SLOTS];
+            last_touch = None;
+            pending_fifty_fifty = None;
             continue;
         }
         let seconds = f64::from(frame.delta.clamp(0.0, MAXIMUM_FRAME_SECONDS));
@@ -462,8 +618,22 @@ pub fn compute_player_window_stats(
                 accumulator.distance_to_own_goal,
             );
 
+            let velocity_change = if prior.present {
+                distance(&state.velocity, &prior.velocity)
+            } else {
+                0.0
+            };
             let seconds_since_jump =
                 accumulate_mechanics(accumulator, prior, state, grounded, on_wall, seconds);
+            let mechanics = accumulate_multi_frame_mechanics(
+                accumulator,
+                prior,
+                state,
+                &ball.position,
+                CarContact { grounded, on_wall },
+                seconds_since_jump,
+                seconds as f32,
+            );
 
             *prior = PreviousCarState {
                 boost: state.boost,
@@ -474,10 +644,15 @@ pub fn compute_player_window_stats(
                 double_jumping: state.controls.double_jumping,
                 dodging: state.controls.dodging,
                 seconds_since_jump,
+                mechanics,
+                velocity: state.velocity,
             };
             live_cars.push(LiveCar {
                 slot,
                 position: state.position,
+                velocity: state.velocity,
+                velocity_change,
+                on_wall,
                 canonical_y,
                 distance_to_ball,
             });
@@ -485,6 +660,12 @@ pub fn compute_player_window_stats(
 
         accumulate_team_roles(&mut accumulators, &live_cars, seconds);
         accumulate_double_commits(&mut accumulators, &live_cars, seconds);
+        accumulate_bumps(
+            &mut accumulators,
+            &live_cars,
+            &mut last_bump_time,
+            frame.time,
+        );
         let possessor = live_cars
             .iter()
             .min_by(|a, b| a.distance_to_ball.total_cmp(&b.distance_to_ball))
@@ -530,10 +711,30 @@ pub fn compute_player_window_stats(
             }
         }
 
+        if let Some(touch) = last_touch.as_mut()
+            && team_sign(touch.slot) * ball.position.y > BACKBOARD_Y
+            && ball.position.z > BACKBOARD_MINIMUM_HEIGHT
+        {
+            touch.off_backboard = true;
+        }
+        if let Some(contest) = pending_fifty_fifty
+            && frame.time - contest.time > FIFTY_FIFTY_OUTCOME_SECONDS
+        {
+            for slot in [contest.toucher, contest.opponent] {
+                if team_sign(slot) * (ball.position.y - contest.ball_y) > 0.0
+                    && let Some(accumulator) = accumulators.get_mut(slot)
+                {
+                    accumulator.fifty_fifty_wins += 1;
+                }
+            }
+            pending_fifty_fifty = None;
+        }
+
         if let Some(closest) = live_cars
             .iter()
             .min_by(|a, b| a.distance_to_ball.total_cmp(&b.distance_to_ball))
         {
+            let mut touched = false;
             if let Some(accumulator) = accumulators.get_mut(closest.slot) {
                 accumulator.possession += seconds;
             }
@@ -562,7 +763,55 @@ pub fn compute_player_window_stats(
                     accumulator.touch_speed_gain += f64::from(speed_after - length(&before));
                     accumulator.aerial_touches += u32::from(ball.position.z > HIGH_AIR_HEIGHT);
                     accumulator.forward_touches += u32::from(sign * ball.velocity.y > 0.0);
+                    accumulator.wall_touches += u32::from(closest.on_wall);
+                    accumulator.power_shots += u32::from(speed_after >= POWER_SHOT_SPEED);
+                    accumulator.flip_touches += u32::from(
+                        previous
+                            .get(closest.slot)
+                            .and_then(|car| car.mechanics.seconds_since_dodge)
+                            .is_some_and(|since| since < FLIP_TOUCH_SECONDS),
+                    );
+                    let aerial = ball.position.z > HIGH_AIR_HEIGHT
+                        && closest.position.z > GROUND_HEIGHT
+                        && !closest.on_wall;
+                    if let Some(last) = last_touch
+                        && last.slot == closest.slot
+                        && ball.position.z > HIGH_AIR_HEIGHT
+                    {
+                        let elapsed = frame.time - last.time;
+                        if last.off_backboard && elapsed < DOUBLE_TAP_SECONDS {
+                            accumulator.double_taps += 1;
+                        } else if last.aerial && aerial && elapsed < AIR_DRIBBLE_SECONDS {
+                            accumulator.air_dribble_touches += 1;
+                        }
+                    }
+                    last_touch = Some(LastTouch {
+                        slot: closest.slot,
+                        time: frame.time,
+                        aerial,
+                        off_backboard: false,
+                    });
+                    touched = true;
                 }
+            }
+            if touched
+                && pending_fifty_fifty.is_none()
+                && let Some(opponent) = live_cars.iter().find(|car| {
+                    (car.slot < SLOTS_PER_TEAM) != (closest.slot < SLOTS_PER_TEAM)
+                        && car.distance_to_ball < FIFTY_FIFTY_DISTANCE
+                })
+            {
+                for slot in [closest.slot, opponent.slot] {
+                    if let Some(accumulator) = accumulators.get_mut(slot) {
+                        accumulator.fifty_fifties += 1;
+                    }
+                }
+                pending_fifty_fifty = Some(PendingFiftyFifty {
+                    time: frame.time,
+                    ball_y: ball.position.y,
+                    toucher: closest.slot,
+                    opponent: opponent.slot,
+                });
             }
         }
         previous_ball_velocity = Some(ball.velocity);
@@ -673,6 +922,209 @@ fn accumulate_mechanics(
         }
     }
     seconds_since_jump
+}
+
+/// Bumps: two touching cars, one of them knocked off its course. The bumper is the car
+/// driving harder into the other; the bumped car is the one whose velocity jumped.
+fn accumulate_bumps(
+    accumulators: &mut [Accumulator; TOTAL_SLOTS],
+    live_cars: &[LiveCar],
+    last_bump_time: &mut [[f32; TOTAL_SLOTS]; TOTAL_SLOTS],
+    time: f32,
+) {
+    for bumper in live_cars {
+        for bumped in live_cars {
+            if bumper.slot == bumped.slot
+                || bumped.velocity_change < BUMP_MINIMUM_VELOCITY_CHANGE
+                || distance(&bumper.position, &bumped.position) > BUMP_DISTANCE
+            {
+                continue;
+            }
+            let toward = Vector3 {
+                x: bumped.position.x - bumper.position.x,
+                y: bumped.position.y - bumper.position.y,
+                z: bumped.position.z - bumper.position.z,
+            };
+            let closing = |velocity: &Vector3| {
+                toward.z.mul_add(
+                    velocity.z,
+                    toward.x.mul_add(velocity.x, toward.y * velocity.y),
+                )
+            };
+            // Closing speed of each car toward the other, along the line between them.
+            if closing(&bumper.velocity) <= -closing(&bumped.velocity) {
+                continue;
+            }
+            let Some(last) = last_bump_time
+                .get_mut(bumper.slot)
+                .and_then(|row| row.get_mut(bumped.slot))
+            else {
+                continue;
+            };
+            if time - *last < BUMP_REPEAT_SECONDS {
+                continue;
+            }
+            *last = time;
+            if (bumper.slot < SLOTS_PER_TEAM) == (bumped.slot < SLOTS_PER_TEAM) {
+                if let Some(accumulator) = accumulators.get_mut(bumper.slot) {
+                    accumulator.teammate_bumps += 1;
+                }
+            } else {
+                if let Some(accumulator) = accumulators.get_mut(bumper.slot) {
+                    accumulator.bumps_inflicted += 1;
+                }
+                if let Some(accumulator) = accumulators.get_mut(bumped.slot) {
+                    accumulator.bumps_received += 1;
+                }
+            }
+        }
+    }
+}
+
+/// Where the car is relative to the ground and walls this frame.
+#[derive(Debug, Clone, Copy)]
+struct CarContact {
+    grounded: bool,
+    on_wall: bool,
+}
+
+/// Mechanics that span several frames: speed flips, half flips, wavedashes, flip resets,
+/// ceiling touches, dribbles and flicks. Returns the car's updated mechanics state.
+fn accumulate_multi_frame_mechanics(
+    accumulator: &mut Accumulator,
+    prior: &PreviousCarState,
+    state: &replay_structs::ActorState,
+    ball: &Vector3,
+    contact: CarContact,
+    seconds_since_jump: f32,
+    seconds: f32,
+) -> MechanicsState {
+    let previous = if prior.present {
+        prior.mechanics
+    } else {
+        MechanicsState::default()
+    };
+    let controls = state.controls;
+    let height = state.position.z;
+    let dodge_started = controls.dodging && !prior.dodging;
+    let double_jump_started = controls.double_jumping && !prior.double_jumping;
+    let on_ceiling = height > CEILING_HEIGHT && !contact.on_wall;
+    let on_surface = contact.grounded || contact.on_wall || on_ceiling;
+    let forward = horizontal_forward(&state.rotation);
+    let pitch = controls.dodge_torque.y;
+    let roll = controls.dodge_torque.x;
+
+    if on_ceiling && !previous.on_ceiling {
+        accumulator.ceiling_touches += 1;
+    }
+
+    // Flip resets: a second double jump or dodge in one airborne stretch, high up, after
+    // the car was within wheel reach of the ball.
+    let mut flips_since_surface = if on_surface {
+        0
+    } else {
+        previous.flips_since_surface
+    };
+    let near_ball_since_surface = !on_surface
+        && (previous.near_ball_since_surface
+            || distance(&state.position, ball) < FLIP_RESET_BALL_DISTANCE);
+    if (dodge_started || double_jump_started) && !on_surface {
+        flips_since_surface += 1;
+        if flips_since_surface >= 2 && near_ball_since_surface && height > HIGH_AIR_HEIGHT {
+            accumulator.flip_resets += 1;
+        }
+    }
+
+    // Wavedashes: a dodge just before landing, after a real stretch in the air.
+    let seconds_airborne = if contact.grounded || contact.on_wall {
+        0.0
+    } else {
+        previous.seconds_airborne + seconds
+    };
+    if dodge_started
+        && height < WAVEDASH_MAXIMUM_HEIGHT
+        && state.velocity.z < 0.0
+        && previous.seconds_airborne > WAVEDASH_MINIMUM_AIRBORNE_SECONDS
+    {
+        accumulator.wavedashes += 1;
+    }
+
+    // Speed flips: a fast, boosting, diagonal front flip off the ground.
+    if dodge_started
+        && height < LOW_DODGE_MAXIMUM_HEIGHT
+        && controls.boosting
+        && seconds_since_jump < SPEED_FLIP_FOLLOW_UP_SECONDS
+        && length(&state.velocity) > SPEED_FLIP_MINIMUM_SPEED
+        && pitch > 0.0
+        && pitch.abs() <= DOMINANT_TORQUE_RATIO * roll.abs()
+        && roll.abs() <= DOMINANT_TORQUE_RATIO * pitch.abs()
+    {
+        accumulator.speed_flips += 1;
+    }
+
+    // Half flips: a back flip off the ground after which the car faces the other way.
+    let mut half_flip = previous
+        .half_flip
+        .map(|pending| PendingHalfFlip {
+            seconds_left: pending.seconds_left - seconds,
+            ..pending
+        })
+        .filter(|pending| pending.seconds_left > 0.0);
+    if let Some(pending) = half_flip
+        && height < LOW_DODGE_MAXIMUM_HEIGHT
+        && let Some(forward) = forward
+        && forward
+            .x
+            .mul_add(pending.forward.x, forward.y * pending.forward.y)
+            < TURNED_AROUND_DOT
+    {
+        accumulator.half_flips += 1;
+        half_flip = None;
+    }
+    if dodge_started
+        && height < LOW_DODGE_MAXIMUM_HEIGHT
+        && pitch < 0.0
+        && pitch.abs() > DOMINANT_TORQUE_RATIO * roll.abs()
+        && let Some(forward) = forward
+    {
+        half_flip = Some(PendingHalfFlip {
+            seconds_left: HALF_FLIP_SECONDS,
+            forward,
+        });
+    }
+
+    // Dribbles and flicks: the ball on the car's roof, then a dodge.
+    let relative_height = ball.z - height;
+    let carrying = height < DRIBBLE_MAXIMUM_CAR_HEIGHT
+        && (DRIBBLE_MINIMUM_RELATIVE_HEIGHT..=DRIBBLE_MAXIMUM_RELATIVE_HEIGHT)
+            .contains(&relative_height)
+        && (ball.x - state.position.x).hypot(ball.y - state.position.y)
+            < DRIBBLE_MAXIMUM_HORIZONTAL_DISTANCE;
+    let carrying_seconds = if carrying {
+        accumulator.dribble += f64::from(seconds);
+        previous.carrying_seconds + seconds
+    } else {
+        0.0
+    };
+    if dodge_started
+        && previous.carrying_seconds.max(carrying_seconds) > FLICK_MINIMUM_CARRY_SECONDS
+    {
+        accumulator.flicks += 1;
+    }
+
+    MechanicsState {
+        seconds_airborne,
+        flips_since_surface,
+        near_ball_since_surface,
+        half_flip,
+        carrying_seconds,
+        on_ceiling,
+        seconds_since_dodge: if dodge_started {
+            Some(0.0)
+        } else {
+            previous.seconds_since_dodge.map(|since| since + seconds)
+        },
+    }
 }
 
 /// Demolition events of the same victim closer together than this are one demolition.
@@ -1070,6 +1522,26 @@ fn finish(
             f64::from(accumulator.recovered_goal_side),
             f64::from(accumulator.recovery_touches),
         ),
+        per_minute(f64::from(accumulator.speed_flips)),
+        per_minute(f64::from(accumulator.half_flips)),
+        per_minute(f64::from(accumulator.wavedashes)),
+        per_minute(f64::from(accumulator.flip_resets)),
+        per_minute(f64::from(accumulator.ceiling_touches)),
+        fraction(accumulator.dribble),
+        per_minute(f64::from(accumulator.flicks)),
+        per_minute(f64::from(accumulator.air_dribble_touches)),
+        per_minute(f64::from(accumulator.double_taps)),
+        per_touch(f64::from(accumulator.wall_touches)),
+        per_touch(f64::from(accumulator.flip_touches)),
+        per_minute(f64::from(accumulator.power_shots)),
+        per_minute(f64::from(accumulator.fifty_fifties)),
+        ratio(
+            f64::from(accumulator.fifty_fifty_wins),
+            f64::from(accumulator.fifty_fifties),
+        ),
+        per_minute(f64::from(accumulator.bumps_inflicted)),
+        per_minute(f64::from(accumulator.bumps_received)),
+        per_minute(f64::from(accumulator.teammate_bumps)),
         players_per_team as f32,
     ];
     Some(PlayerMatchStats {
@@ -1209,6 +1681,84 @@ mod tests {
             .map_or([0.0; MATCH_STAT_COUNT], |s| s.values);
         let seconds = 30.0 / 30.0;
         assert!((values[index_of("big_pads_per_minute")] - 60.0 / seconds).abs() < 1e-3);
+    }
+
+    fn stats_of_first_car(frames: Vec<GameFrame>) -> [f32; MATCH_STAT_COUNT] {
+        let parsed = ParsedReplay {
+            frames,
+            ..ParsedReplay::default()
+        };
+        compute_player_match_stats(&parsed, &roster())[0]
+            .as_ref()
+            .map_or([0.0; MATCH_STAT_COUNT], |s| s.values)
+    }
+
+    /// A second flip in one airborne stretch, after the wheels reached the ball, is a flip
+    /// reset; one flip is not.
+    #[test]
+    fn a_second_flip_near_the_ball_is_a_flip_reset() {
+        let airborne = |double_jump: bool, dodge: bool| {
+            let mut frames: Vec<GameFrame> = (0..40).map(|_| frame(0.0, 0.0)).collect();
+            for (index, later) in frames.iter_mut().enumerate().skip(1) {
+                later.ball.position = Vector3 {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 600.0,
+                };
+                let car = &mut later.players[0].actor_state;
+                car.position.z = 500.0;
+                car.controls.double_jumping = double_jump && index >= 10;
+                car.controls.dodging = dodge && index >= 20;
+            }
+            stats_of_first_car(frames)[index_of("flip_resets_per_minute")]
+        };
+        assert!(airborne(true, true) > 0.0);
+        assert!(airborne(true, false).abs() < f32::EPSILON);
+    }
+
+    /// Driving into an opponent who gets knocked back is a bump for the driver.
+    #[test]
+    fn knocking_an_opponent_back_is_a_bump() {
+        let mut frames: Vec<GameFrame> = (0..20).map(|_| frame(0.0, 150.0)).collect();
+        for (index, later) in frames.iter_mut().enumerate() {
+            later.players[0].actor_state.velocity.y = 1500.0;
+            later.players[3].actor_state.velocity.y = if index < 10 { -500.0 } else { 1500.0 };
+        }
+        let parsed = ParsedReplay {
+            frames,
+            ..ParsedReplay::default()
+        };
+        let stats = compute_player_match_stats(&parsed, &roster());
+        let value = |slot: usize, name: &str| {
+            stats[slot]
+                .as_ref()
+                .map_or(0.0, |s| s.values[index_of(name)])
+        };
+        assert!(value(0, "bumps_inflicted_per_minute") > 0.0);
+        assert!(value(SLOTS_PER_TEAM, "bumps_received_per_minute") > 0.0);
+        assert!(value(SLOTS_PER_TEAM, "bumps_inflicted_per_minute").abs() < f32::EPSILON);
+    }
+
+    /// A fast, boosting, diagonal front flip off the ground is a speed flip.
+    #[test]
+    fn a_fast_boosting_diagonal_flip_is_a_speed_flip() {
+        let mut frames: Vec<GameFrame> = (0..30).map(|_| frame(0.0, 0.0)).collect();
+        for (index, later) in frames.iter_mut().enumerate() {
+            let car = &mut later.players[0].actor_state;
+            car.velocity.y = 1500.0;
+            car.controls.boosting = true;
+            car.controls.jumping = index >= 5;
+            if index >= 7 {
+                car.position.z = 60.0;
+                car.controls.dodging = true;
+                car.controls.dodge_torque = Vector3 {
+                    x: 0.7,
+                    y: 0.7,
+                    z: 0.0,
+                };
+            }
+        }
+        assert!(stats_of_first_car(frames)[index_of("speed_flips_per_minute")] > 0.0);
     }
 }
 

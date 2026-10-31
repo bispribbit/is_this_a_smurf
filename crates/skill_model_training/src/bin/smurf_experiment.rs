@@ -30,7 +30,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use feature_extractor::{MATCH_STAT_NAMES, SLOTS_PER_TEAM, TOTAL_SLOTS};
+use feature_extractor::{MATCH_STAT_NAMES, TOTAL_SLOTS};
 use skill_model::coaching::tier_index;
 use skill_model::{OPPONENT_INDEPENDENT_STATS, PlaysLikeModel, SkillModelBundle};
 use skill_model_training::dataset::{Lobby, Partition, read_lobbies};
@@ -38,6 +38,10 @@ use skill_model_training::evaluation::PROXY_POSITIVE_MARGIN_MMR;
 use skill_model_training::gradient_boosting::GradientBoostingConfig;
 use skill_model_training::label_cleaning::{
     SlotScores, clean_labels_in_rounds, train_plays_like_model,
+};
+use skill_model_training::smurf_references::{
+    HIGH_RANK_TIER, MECHANIC_STATS, TIER_NAMES, as_tiers, is_dominant_smurf, is_mechanical_smurf,
+    median, reference_mechanics, team_goal_difference,
 };
 use uuid::Uuid;
 
@@ -64,40 +68,6 @@ struct Args {
     #[arg(long, default_value_t = 6)]
     examples: usize,
 }
-
-/// Rank names by tier index.
-const TIER_NAMES: [&str; 22] = [
-    "B1", "B2", "B3", "S1", "S2", "S3", "G1", "G2", "G3", "P1", "P2", "P3", "D1", "D2", "D3", "C1",
-    "C2", "C3", "GC1", "GC2", "GC3", "SSL",
-];
-
-/// Highest tier a mechanical or dominant smurf can be labelled with (Gold II).
-const OBVIOUS_MAXIMUM_TIER: usize = 7;
-
-/// Tier whose median mechanics a mechanical smurf must reach (Champion I).
-const OBVIOUS_REFERENCE_TIER: usize = 15;
-
-/// Aerial mechanics compared with the reference tier.
-const MECHANIC_STATS: [&str; 6] = [
-    "fast_aerial_fraction",
-    "air_roll_fraction",
-    "aerial_touch_fraction",
-    "high_air_fraction",
-    "aerial_dodges_per_minute",
-    "wavedash_like_dodges_per_minute",
-];
-
-/// How many of [`MECHANIC_STATS`] must reach the reference tier's median.
-const MINIMUM_MECHANICS_AT_REFERENCE: usize = 4;
-
-/// Goals a mechanical smurf's team must win by.
-const MINIMUM_GOAL_DIFFERENCE: f32 = 2.0;
-
-/// Goals a dominant smurf's team must win by.
-const DOMINANT_GOAL_DIFFERENCE: f32 = 3.0;
-
-/// Labels at or above this tier (Diamond I) make a flag most likely wrong.
-const HIGH_RANK_TIER: usize = 12;
 
 /// One playlist size and its report name.
 struct Playlist {
@@ -139,105 +109,6 @@ struct Variant {
     /// Score the other players with the midpoint of their plays-like and whole-match
     /// divisions instead of plays-like alone.
     blend_others_with_match_model: bool,
-}
-
-fn stat_index(name: &str) -> usize {
-    MATCH_STAT_NAMES
-        .iter()
-        .position(|stat| *stat == name)
-        .unwrap_or(usize::MAX)
-}
-
-/// Scores as tier indices, so a margin means the same number of divisions at every rank.
-fn as_tiers(scores: SlotScores) -> SlotScores {
-    scores.map(|score| score.map(|mmr| tier_index(mmr) as f32))
-}
-
-fn median(values: &mut [f32]) -> f32 {
-    values.sort_by(f32::total_cmp);
-    let middle = values.len() / 2;
-    let upper = values.get(middle).copied().unwrap_or(0.0);
-    if values.len().is_multiple_of(2) {
-        let lower = values.get(middle.wrapping_sub(1)).copied().unwrap_or(upper);
-        f32::midpoint(lower, upper)
-    } else {
-        upper
-    }
-}
-
-/// Median of each mechanic stat among training players labelled with the reference tier.
-fn reference_mechanics(lobbies: &[Lobby]) -> [f32; MECHANIC_STATS.len()] {
-    core::array::from_fn(|index| {
-        let stat = stat_index(MECHANIC_STATS[index]);
-        let mut values: Vec<f32> = lobbies
-            .iter()
-            .filter(|lobby| lobby.partition != Partition::Evaluation)
-            .flat_map(|lobby| {
-                lobby
-                    .labelled_slots()
-                    .filter(|&slot| tier_index(lobby.targets[slot]) == OBVIOUS_REFERENCE_TIER)
-                    .filter_map(|slot| lobby.stats[slot].map(|stats| stats[stat]))
-            })
-            .collect();
-        median(&mut values)
-    })
-}
-
-fn team_goal_difference(lobby: &Lobby, slot: usize) -> f32 {
-    let goals = stat_index("goals");
-    let team = usize::from(slot >= SLOTS_PER_TEAM);
-    let mut team_goals = [0.0f32; 2];
-    for (other, stats) in lobby.stats.iter().enumerate() {
-        if let Some(stats) = stats {
-            team_goals[usize::from(other >= SLOTS_PER_TEAM)] += stats[goals];
-        }
-    }
-    team_goals[team] - team_goals[1 - team]
-}
-
-/// Labelled Gold II or lower, Champion I mechanics on most aerial stats, won by two.
-fn is_mechanical_smurf(
-    lobby: &Lobby,
-    slot: usize,
-    reference: &[f32; MECHANIC_STATS.len()],
-) -> bool {
-    let label = lobby.targets[slot];
-    let Some(stats) = lobby.stats[slot].as_ref() else {
-        return false;
-    };
-    if label <= 0.0 || tier_index(label) > OBVIOUS_MAXIMUM_TIER {
-        return false;
-    }
-    let at_reference = MECHANIC_STATS
-        .iter()
-        .zip(reference)
-        .filter(|(name, median)| **median > 0.0 && stats[stat_index(name)] >= **median)
-        .count();
-    at_reference >= MINIMUM_MECHANICS_AT_REFERENCE
-        && team_goal_difference(lobby, slot) >= MINIMUM_GOAL_DIFFERENCE
-}
-
-/// Labelled Gold II or lower, won by three, and the most possession and touches in the
-/// lobby.
-fn is_dominant_smurf(lobby: &Lobby, slot: usize) -> bool {
-    let label = lobby.targets[slot];
-    if label <= 0.0 || tier_index(label) > OBVIOUS_MAXIMUM_TIER {
-        return false;
-    }
-    let leads = |name: &str| {
-        let stat = stat_index(name);
-        let own = lobby.stats[slot].map_or(f32::NEG_INFINITY, |stats| stats[stat]);
-        lobby
-            .stats
-            .iter()
-            .enumerate()
-            .filter(|(other, _)| *other != slot)
-            .filter_map(|(_, stats)| stats.map(|stats| stats[stat]))
-            .all(|value| own > value)
-    };
-    team_goal_difference(lobby, slot) >= DOMINANT_GOAL_DIFFERENCE
-        && leads("possession_fraction")
-        && leads("touches_per_minute")
 }
 
 /// One evaluation player as the flag report sees them.

@@ -11,3 +11,4 @@ pub mod dataset;
 pub mod evaluation;
 pub mod gradient_boosting;
 pub mod label_cleaning;
+pub mod smurf_references;
