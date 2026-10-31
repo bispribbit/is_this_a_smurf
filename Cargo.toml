@@ -37,14 +37,26 @@ getrandom_for_transitive_rand = { package = "getrandom", version = "0.3.4", defa
 ] }
 governor = { version = "0.10.4" }
 js-sys = { version = "0.3.106" }
-manganis = { version = "0.7.10", default-features = false, features = ["dioxus"] }
+manganis = { version = "0.7.10", default-features = false, features = [
+    "dioxus",
+] }
 object_store = { version = "0.14.2" }
 rayon = { version = "1.12.0" }
-rand = { version = "0.10.3", default-features = false, features = ["std", "thread_rng"] }
+rand = { version = "0.10.3", default-features = false, features = [
+    "std",
+    "thread_rng",
+] }
 reqwest = { version = "0.13.5", features = ["json"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151" }
-sqlx = { version = "0.9.0", features = ["runtime-tokio", "postgres", "migrate", "uuid", "chrono", "json"] }
+sqlx = { version = "0.9.0", features = [
+    "runtime-tokio",
+    "postgres",
+    "migrate",
+    "uuid",
+    "chrono",
+    "json",
+] }
 strum = { version = "0.28.0", features = ["derive"] }
 thiserror = { version = "2.0.21" }
 tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros"] }
@@ -78,7 +90,7 @@ rust_2024_compatibility = { level = "warn", priority = -1 }
 
 tail_expr_drop_order = { level = "allow" } # Warns on all significant drop
 
-elided-lifetimes-in-paths = "allow" # Adds lots of noise in Bevy code for no benefit
+elided_lifetimes_in_paths = "allow"
 unsafe_code = "deny"
 
 [workspace.lints.clippy]
