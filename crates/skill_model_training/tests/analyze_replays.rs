@@ -18,6 +18,8 @@ mod tests {
     struct SampleReplay {
         path: PathBuf,
         players_per_team: usize,
+        /// From `data/smurf`: someone must be flagged.
+        expect_smurf: bool,
     }
 
     fn sample_replays() -> Vec<SampleReplay> {
@@ -25,6 +27,7 @@ mod tests {
         let test_data = |name: &str, players_per_team: usize| SampleReplay {
             path: root.join("test_data").join(name),
             players_per_team,
+            expect_smurf: false,
         };
         let mut replays = vec![
             test_data("2af51380-05b5-44ac-8b31-94b8b0f8da84.replay", 3),
@@ -40,9 +43,25 @@ mod tests {
         if let Ok(entries) = std::fs::read_dir(root.join("data/smurf")) {
             let mut smurfs: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
             smurfs.sort();
-            replays.extend(smurfs.into_iter().map(|path| SampleReplay {
-                path,
-                players_per_team: 3,
+            // Smurf samples are named like the test data: `ranked-duels-…`, `ranked-doubles-…`,
+            // or a bare id for standard.
+            replays.extend(smurfs.into_iter().map(|path| {
+                let name = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let players_per_team = if name.starts_with("ranked-duels-") {
+                    1
+                } else if name.starts_with("ranked-doubles-") {
+                    2
+                } else {
+                    3
+                };
+                SampleReplay {
+                    path,
+                    players_per_team,
+                    expect_smurf: true,
+                }
             }));
         }
         replays
@@ -61,6 +80,7 @@ mod tests {
         for SampleReplay {
             path,
             players_per_team,
+            expect_smurf,
         } in sample_replays()
         {
             let replay = std::fs::read(&path).expect("sample replay is readable");
@@ -105,8 +125,23 @@ mod tests {
                     .and_then(|advice| advice.as_ref())
                     .map(|advice| advice.line(0, name))
                     .unwrap_or_default();
+                let smurf = match analysis.smurf.get(slot).copied().flatten() {
+                    Some(skill_model::SmurfReason::RankedAboveLobby) => {
+                        "SMURF (ranked)".to_string()
+                    }
+                    Some(skill_model::SmurfReason::PlaysAboveLobby) => format!(
+                        "SMURF (plays like {:.0})",
+                        analysis
+                            .plays_like_mmr
+                            .get(slot)
+                            .copied()
+                            .flatten()
+                            .unwrap_or_default()
+                    ),
+                    None => String::new(),
+                };
                 println!(
-                    "  {name:<20} {:>6} [{}]  {roast}",
+                    "  {name:<20} {:>6} [{}] {smurf} {roast}",
                     mmr.map_or_else(|| "-".to_string(), |value| format!("{value:.0}")),
                     form.join(" ")
                 );
@@ -123,6 +158,11 @@ mod tests {
             assert!(
                 scored >= (players_per_team * 2).saturating_sub(1).max(2),
                 "{}: only {scored} players scored",
+                path.display()
+            );
+            assert!(
+                !expect_smurf || analysis.smurf.iter().any(Option::is_some),
+                "{}: smurf sample no longer flags anyone",
                 path.display()
             );
             // Short clips get fewer windows; every replay gets at least one.

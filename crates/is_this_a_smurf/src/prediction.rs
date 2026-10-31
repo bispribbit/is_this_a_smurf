@@ -8,7 +8,7 @@
 use feature_extractor::TOTAL_SLOTS;
 use rand::{RngExt, rng};
 use replay_structs::{GameFrame, MatchFormat, ParsedReplay, RankDivision, Team};
-use skill_model::{MatchAnalysis, PlayerTimeline};
+use skill_model::{MatchAnalysis, PlayerTimeline, SmurfReason};
 
 use crate::app_state::{
     GoalMarkerDisplay, PlayerAverage, PredictionResults, SegmentStepInfo, StepStatus,
@@ -173,8 +173,8 @@ pub(crate) fn build_goal_markers(
     markers
 }
 
-/// Median of the lobby's whole-match predictions: the baseline the smurf flag compares
-/// each player against.
+/// Median of the lobby's whole-match predictions: the rank the verdict's no-smurf lines are
+/// written for.
 pub(crate) fn lobby_median_mmr(player_averages: &[PlayerAverage]) -> f32 {
     let mut values: Vec<f32> = player_averages.iter().map(|player| player.mmr).collect();
     values.sort_by(f32::total_cmp);
@@ -214,6 +214,10 @@ pub(crate) fn build_prediction_results(
                 next_rank_roast: analysis.coaching[slot].as_ref().map(|advice| {
                     advice.line(random.random_range(0..usize::MAX), &analysis.names[slot])
                 }),
+                smurf: analysis.smurf[slot],
+                plays_like: analysis.plays_like_mmr[slot]
+                    .filter(|_| analysis.smurf[slot] == Some(SmurfReason::PlaysAboveLobby))
+                    .map(RankDivision::from),
             })
         })
         .collect();

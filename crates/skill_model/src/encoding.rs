@@ -12,17 +12,17 @@
 //!   error of at most half a step: far below 0.1 MMR once the learning rate applies.
 //!
 //! Layout: [`MAGIC`] then brotli(payload). The payload is the header JSON (length-prefixed;
-//! stat names, layouts, scales, coaching table) followed by four ensembles in a fixed order
-//! (match absolute, match within, window absolute, window within). Integers and floats are
+//! stat names, layouts, scales, coaching table) followed by five ensembles in a fixed order
+//! (match absolute, match within, window absolute, window within, plays like). Integers and floats are
 //! little-endian.
 
 use serde::{Deserialize, Serialize};
 
 use crate::coaching::CoachingTables;
-use crate::model::{FrozenEnsemble, FrozenNode, TabularLayout, TabularSkillModel};
+use crate::model::{FrozenEnsemble, FrozenNode, PlaysLikeModel, TabularLayout, TabularSkillModel};
 
 /// File signature and format version.
-const MAGIC: &[u8; 8] = b"RLSKILL3";
+const MAGIC: &[u8; 8] = b"RLSKILL4";
 
 /// Largest quantised leaf magnitude.
 const LEAF_STEPS: f32 = 32767.0;
@@ -34,6 +34,8 @@ pub struct SkillModelBundle {
     pub match_model: TabularSkillModel,
     /// Scores fixed windows of live play: the timeline.
     pub window_model: TabularSkillModel,
+    /// Scores the rank each player's own stats play like: the smurf flag.
+    pub plays_like_model: PlaysLikeModel,
     /// Window length the window model was trained on, in seconds of live play.
     pub window_seconds: f32,
     /// Multiplier applied to a player's window-to-window form on the timeline so a typical
@@ -108,6 +110,7 @@ struct BundleHeader {
     stat_names: Vec<String>,
     match_model: ModelHeader,
     window_model: ModelHeader,
+    plays_like_layout: TabularLayout,
     window_seconds: f32,
     timeline_emphasis: f32,
     coaching: CoachingTables,
@@ -545,6 +548,7 @@ impl SkillModelBundle {
             stat_names: self.match_model.stat_names.clone(),
             match_model: ModelHeader::of(&self.match_model),
             window_model: ModelHeader::of(&self.window_model),
+            plays_like_layout: self.plays_like_model.layout.clone(),
             window_seconds: self.window_seconds,
             timeline_emphasis: self.timeline_emphasis,
             coaching: self.coaching.clone(),
@@ -559,6 +563,7 @@ impl SkillModelBundle {
             &self.match_model.within,
             &self.window_model.absolute,
             &self.window_model.within,
+            &self.plays_like_model.ensemble,
         ] {
             write_ensemble(ensemble, &mut payload)?;
         }
@@ -596,6 +601,7 @@ impl SkillModelBundle {
         let match_within = reader.ensemble()?;
         let window_absolute = reader.ensemble()?;
         let window_within = reader.ensemble()?;
+        let plays_like = reader.ensemble()?;
         Ok(Self {
             match_model: header.match_model.into_model(
                 header.stat_names.clone(),
@@ -607,6 +613,10 @@ impl SkillModelBundle {
                 window_absolute,
                 window_within,
             ),
+            plays_like_model: PlaysLikeModel {
+                layout: header.plays_like_layout,
+                ensemble: plays_like,
+            },
             window_seconds: header.window_seconds,
             timeline_emphasis: header.timeline_emphasis,
             coaching: header.coaching,
@@ -670,6 +680,14 @@ mod tests {
         SkillModelBundle {
             match_model: model(900.0),
             window_model: model(800.0),
+            plays_like_model: PlaysLikeModel {
+                layout: model(0.0).absolute_layout,
+                ensemble: FrozenEnsemble {
+                    base_prediction: 700.0,
+                    learning_rate: 0.2,
+                    trees: vec![tree()],
+                },
+            },
             window_seconds: 60.0,
             timeline_emphasis: 5.0,
             coaching: CoachingTables::default(),
@@ -688,6 +706,10 @@ mod tests {
                     &decoded.match_model.absolute,
                 ),
                 (&original.window_model.within, &decoded.window_model.within),
+                (
+                    &original.plays_like_model.ensemble,
+                    &decoded.plays_like_model.ensemble,
+                ),
             ] {
                 let difference = (before.predict(&row) - after.predict(&row)).abs();
                 assert!(difference < 1e-3, "prediction moved by {difference}");

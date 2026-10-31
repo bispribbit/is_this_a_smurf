@@ -107,10 +107,6 @@ pub(crate) const fn no_smurf_lines_for_median_rank(rank: RankDivision) -> &'stat
     }
 }
 
-fn player_looks_high_for_lobby(player_mmr: f32, lobby_median_mmr: f32) -> bool {
-    player_mmr > lobby_median_mmr + skill_model::SMURF_MARGIN_OVER_LOBBY_MEDIAN_MMR
-}
-
 fn random_pool_index(rng: &mut impl Rng, pool_len: usize) -> usize {
     if pool_len == 0 {
         return 0;
@@ -227,7 +223,7 @@ pub(crate) fn match_verdict_segments(results: &PredictionResults) -> Vec<Verdict
     let suspects: Vec<String> = results
         .player_averages
         .iter()
-        .filter(|player| player_looks_high_for_lobby(player.mmr, lobby_median_mmr))
+        .filter(|player| player.smurf.is_some())
         .map(|player| player.name.clone())
         .collect();
 

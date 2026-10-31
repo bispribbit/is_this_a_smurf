@@ -289,6 +289,63 @@ impl TabularSkillModel {
     }
 }
 
+/// Predicts each player's MMR from their own stats only: the rank they *play like*,
+/// whatever lobby they are in.
+///
+/// [`TabularSkillModel`] predicts a lobby level plus a gap learned from rank labels, and
+/// those labels hardly ever differ inside a duel or doubles lobby, so it cannot show one
+/// player far above the rest. This model has no lobby input, so a smurf's stats speak for
+/// themselves. It is noisier per player and only feeds the smurf flag
+/// ([`crate::smurf_suspicions`]).
+#[derive(Debug, Clone)]
+pub struct PlaysLikeModel {
+    /// Columns the ensemble sees: own stats only.
+    pub layout: TabularLayout,
+    pub ensemble: FrozenEnsemble,
+}
+
+impl PlaysLikeModel {
+    /// The layout the model is trained with: every stat, own values only.
+    #[must_use]
+    pub fn own_stats_layout() -> TabularLayout {
+        TabularLayout {
+            own: true,
+            deviation: false,
+            lobby_mean: false,
+            team_context: false,
+            stats: (0..MATCH_STAT_COUNT).collect(),
+        }
+    }
+
+    /// Predicts every present slot from raw stat arrays. Absent slots are `None`.
+    #[must_use]
+    pub fn predict_stats(
+        &self,
+        players: &[Option<&[f32; MATCH_STAT_COUNT]>; TOTAL_SLOTS],
+    ) -> [Option<f32>; TOTAL_SLOTS] {
+        let lobby = LobbySummary::new(players);
+        let mut row = Vec::new();
+        core::array::from_fn(|slot| {
+            let stats = players[slot]?;
+            row.clear();
+            self.layout
+                .push_player_features(&lobby, slot, stats, &mut row);
+            Some(self.ensemble.predict(&row).max(0.0))
+        })
+    }
+
+    /// Predicts every present slot from per-player match stats.
+    #[must_use]
+    pub fn predict(
+        &self,
+        players: &[Option<PlayerMatchStats>; TOTAL_SLOTS],
+    ) -> [Option<f32>; TOTAL_SLOTS] {
+        let values: [Option<&[f32; MATCH_STAT_COUNT]>; TOTAL_SLOTS] =
+            core::array::from_fn(|slot| players[slot].as_ref().map(|stats| &stats.values));
+        self.predict_stats(&values)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

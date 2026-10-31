@@ -5,11 +5,12 @@ and what we learned getting here.
 
 ## What ships
 
-One file, `data/skill_model.bin` (~1.4 MB, see [Bundle format](#bundle-format)), embedded in the app. It holds:
+One file, `data/skill_model.bin` (~2.1 MB, see [Bundle format](#bundle-format)), embedded in the app. It holds:
 
 | Part | Input | Output | Used for |
 |---|---|---|---|
 | **Match model** | each player's whole-match stats | one MMR per player | rank cards, smurf badge, verdict |
+| **Plays-like model** | each player's own stats, no lobby | the rank they play like | smurf badge, verdict |
 | **Window model** | the same stats over 60 s of live play | one MMR per player per minute | the timeline |
 | **Coaching table** | per-rank medians of 19 actionable stats | one roast per player | the line under each card |
 
@@ -71,6 +72,31 @@ and (b) show a gap a reader would notice ("0 % vs 1 %" never qualifies). A tip i
 automatically if the data says its "better" direction is wrong.
 Lines and tips live in code; editing them needs no retraining.
 
+### 5. Smurf flag (`crates/skill_model/src/smurf.rs`)
+
+`smurf_suspicions` is the one rule the badge, the verdict and the evaluation tools share. A
+player is flagged when either:
+
+- **ranked above the lobby**: their match-model prediction is more than 100 MMR over the
+  lobby's median (`SMURF_MARGIN_OVER_LOBBY_MEDIAN_MMR`). It finds parties carrying a weaker
+  friend in standard, and almost never fires in duels or doubles: the match model learns
+  gaps from rank labels, and labels hardly ever differ inside those lobbies;
+- **plays above the lobby**: the rank their own stats play like (the plays-like model, one
+  ensemble on own stats only, no lobby features) is more than four divisions over the
+  lobby's median (`SMURF_MARGIN_OVER_LOBBY_MEDIAN_TIERS`). Counted in divisions, not MMR:
+  divisions are several times wider at the top, and with an MMR margin a third of the flags
+  landed on Diamond-and-up players. The card then says "Plays like Champion II".
+
+### 6. Label cleaning (`crates/skill_model_training/src/label_cleaning.rs`)
+
+A smurf's label is the smurf account's rank, so every Champion on a Bronze account teaches
+the models that Champion stats happen in Bronze (about a tenth of Bronze I duelists play
+like Champions). `train` first scores every training player with a plays-like model that
+never saw their replay (two folds), drops labels at least 300 MMR below that score
+(`CLEAN_MARGIN_MMR`; 3.5 % of standard labels, 5 % of doubles, 6 % of duels, Bronze I most
+of all), and trains everything else (match, window and plays-like models, coaching tables)
+on what is left. Evaluation labels are never touched.
+
 ## Playlists
 
 One model scores **duels, doubles and standard**, ranked or casual.
@@ -80,6 +106,11 @@ One model scores **duels, doubles and standard**, ranked or casual.
   mechanics and positioning learned from the larger 3v3 set carry over.
 - **Labels share one scale.** A label is the division's middle on the 3v3 MMR scale, so the
   model predicts a *rank*, and "Platinum II" means Platinum II in the replay's own playlist.
+  The same player is ranked lower in duels than in standard; the trees learn that from
+  `players_per_team` (no playlist is biased as a whole: mean error +3, -5 and 0 MMR).
+- **One model, not three.** `compare_playlist_models` trains a joint model and one model per
+  playlist over three seeds: they land within ~4 MMR of each other everywhere (joint better
+  in duels and standard, separate in doubles), so one model ships.
 - **Casual** replays are scored as the competitive playlist of the same size. Players can
   join and leave mid-match, so the roster has [`SLOTS_PER_TEAM`] = 5 slots per team; players
   with under 30 s of live play (`MINIMUM_MATCH_SECONDS`) are not scored and do not count
@@ -137,6 +168,15 @@ cargo run --release -p skill_model_training --bin train
 # How accuracy grows with data (optionally --players-per-team 1|2, --keep-players-per-team)
 cargo run --release -p skill_model_training --bin learning_curve
 
+# One model for every playlist vs one per playlist
+cargo run --release -p skill_model_training --bin compare_playlist_models
+
+# Flagged smurfs in a playlist's evaluation replays (1 duels, 2 doubles, 3 standard)
+cargo run --release -p skill_model_training --bin find_smurf_examples -- --players-per-team 1
+
+# How the smurf flag and label cleaning were chosen
+cargo run --release -p skill_model_training --bin smurf_experiment
+
 # Only iterate on roast lines (no retraining)
 cargo run --release -p skill_model_training --bin train -- --reuse-bundle
 
@@ -149,21 +189,29 @@ refuses a bundle trained on a different stat list.
 
 ## How good is it
 
-Measured on the database's **evaluation split** (3,013 replays, ~7,400 labelled players),
-which no part of training sees. Labels are account ranks at match time.
+Measured on the database's **evaluation split** (763 duels, 793 doubles and 3,002 standard
+replays), which no part of training sees. Labels are account ranks at match time.
 
-| Metric | Meaning | Value |
-|---|---|---|
-| player RMSE | whole-match error per player | **~106 MMR** |
-| lobby RMSE | error of the lobby's average | **~95 MMR** |
-| within_r | correlation of predicted vs true *gaps to the lobby* (0 = no signal) | **~0.56** |
-| concordance | share of lobbymate pairs (>25 MMR apart) ordered correctly (0.5 = chance) | **~0.65** |
+| Metric | Meaning | Duels | Doubles | Standard |
+|---|---|---|---|---|
+| player RMSE | whole-match error per player | 177 | 114 | **102** |
+| lobby RMSE | error of the lobby's average | 176 | 105 | **90** |
+| within_r | correlation of predicted vs true *gaps to the lobby* (0 = no signal) | 0.27 | 0.37 | **0.53** |
+| concordance | share of lobbymate pairs (>25 MMR apart) ordered correctly (0.5 = chance) | 0.64 | 0.71 | **0.67** |
 
-The smurf badge fires when a player is **100 MMR above the lobby's median prediction**
-(`skill_model::SMURF_MARGIN_OVER_LOBBY_MEDIAN_MMR`). Against players ranked ≥150 above their
-lobby (mostly parties with a stronger friend: smurf-like lobbies where the truth is known) it
-flags ~0.7 % of players with **~60 % precision**. Raising the margin trades recall for
-precision (+150: ~80 %, +200: ~90 %); `train` prints the whole table.
+Duels and doubles are scored on 400 to 800 players, so their within_r carries ±0.05.
+
+The smurf flag ([section 5](#5-smurf-flag-cratesskill_modelsrcsmurfrs)) fires on 0.7 % of
+duels players, 4.1 % of doubles and 2.7 % of standard. Labels cannot confirm a real smurf
+(their label is the smurf account's), so it was chosen with `smurf_experiment` against two
+references:
+
+- **obvious smurfs**, defined without any model: labelled Gold II or lower, Champion I
+  mechanics on most aerial stats, and their team won by two or more. The ranked-above rule
+  alone caught none in any playlist; with the plays-above rule the flag catches about half
+  in standard (7/14) and doubles (5/16), but only 1/14 in duels;
+- **parties**, players ranked ≥150 over their lobby: the ranked-above rule flags 0.4 % of
+  players with ~57 % precision (`train` prints its margin table).
 
 Expect **±0.005 within_r** from the trees' random seed alone, so compare changes over a few
 seeds before believing a small gain.
@@ -190,6 +238,16 @@ tree model replaced it in October 2026. What is worth remembering:
   reproduces it.
 - **Score the whole match, show the windows.** Averaging per-window predictions loses ~0.08
   within_r against scoring the whole match directly.
+- **A "gap to the lobby" model cannot see smurfs where labels never differ.** 90 % of ranked
+  duels have both players within 60 MMR, so the match model learned that duels have no
+  gaps: a Champion-level player 5-0 up on a Bronze I scored 141 against their opponent's 117.
+  Scoring each player from their own stats alone fixed that in doubles and standard.
+- **Margins belong in divisions, not MMR.** Bronze divisions are ~60 MMR wide, Champion
+  ones ~120: a fixed MMR margin is several ranks at the bottom and barely one at the top.
+- **Labels the model cannot reach distort everything.** SSL used to be labelled 2,200,
+  above its own listed range (1,883 to 2,000); the trees predicted SSLs 400 to 600 MMR lower
+  and those few players dominated the duels error. Labelling SSL at 1,941 cut duels lobby
+  RMSE from 196 to 170.
 
 ## Ideas not tried yet
 
@@ -197,3 +255,6 @@ tree model replaced it in October 2026. What is worth remembering:
 - Make the parser's car/component linking deterministic (it iterates `HashMap`s, so repeated
   extractions differ by ~1 % on boost/jump counts).
 - Store Ballchasing platform ids, which would allow real smurf labels from account history.
+- Duels smurfs: the plays-like model catches 1 in 14 obvious ones. Touches, possession and
+  ball speed are a split with one opponent there; stats that do not depend on the opponent
+  (raw mechanics rates, shot speed) might do better.

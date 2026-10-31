@@ -6,7 +6,6 @@ use replay_structs::{Team, UnsupportedReplayMatch};
 
 use crate::app_state::{AppState, PlayerAverage, PredictionResults, ProgressState};
 use crate::branding::SMURF_SUSPECT_BADGE;
-use crate::prediction::lobby_median_mmr;
 use crate::rank_icon::rank_division_icon_asset;
 use crate::verdict_copy::VerdictSegment;
 
@@ -23,8 +22,12 @@ const PREDICTED_RANK_ROAST_LABELS: [&str; 10] = [
     "Professional Opinion Nobody Asked For",
 ];
 
-fn player_looks_high_for_lobby(player_mmr: f32, lobby_median_mmr: f32) -> bool {
-    player_mmr > lobby_median_mmr + skill_model::SMURF_MARGIN_OVER_LOBBY_MEDIAN_MMR
+/// Badge tooltip for why a player is flagged.
+const fn smurf_badge_text(reason: skill_model::SmurfReason) -> &'static str {
+    match reason {
+        skill_model::SmurfReason::RankedAboveLobby => "Predicted rank is much higher than lobby",
+        skill_model::SmurfReason::PlaysAboveLobby => "Plays several ranks above this lobby",
+    }
 }
 
 fn predicted_rank_roast_label() -> &'static str {
@@ -52,7 +55,6 @@ pub(crate) fn PlayerSummaryGrid(results: PredictionResults) -> Element {
         .cloned()
         .collect();
 
-    let lobby_median_mmr = lobby_median_mmr(&results.player_averages);
     let format = results.match_format;
     let size = format.players_per_team;
     let format_note = if format.ranked {
@@ -72,7 +74,6 @@ pub(crate) fn PlayerSummaryGrid(results: PredictionResults) -> Element {
                 loading: false,
                 players_complete: blue_players,
                 player_names_loading: vec![],
-                lobby_median_mmr,
             }
             TeamSummaryCard {
                 team_name: "Orange Team",
@@ -80,7 +81,6 @@ pub(crate) fn PlayerSummaryGrid(results: PredictionResults) -> Element {
                 loading: false,
                 players_complete: orange_players,
                 player_names_loading: vec![],
-                lobby_median_mmr,
             }
         }
     }
@@ -118,7 +118,6 @@ pub(crate) fn PlayerSummaryGridLoading(progress: ProgressState) -> Element {
                     loading: true,
                     players_complete: vec![],
                     player_names_loading: vec![],
-                    lobby_median_mmr: 0.0,
                 }
                 TeamSummaryCard {
                     team_name: "Orange Team",
@@ -126,7 +125,6 @@ pub(crate) fn PlayerSummaryGridLoading(progress: ProgressState) -> Element {
                     loading: true,
                     players_complete: vec![],
                     player_names_loading: vec![],
-                    lobby_median_mmr: 0.0,
                 }
             }
         };
@@ -159,7 +157,6 @@ pub(crate) fn PlayerSummaryGridLoading(progress: ProgressState) -> Element {
                 loading: true,
                 players_complete: vec![],
                 player_names_loading: blue_names,
-                lobby_median_mmr: 0.0,
             }
             TeamSummaryCard {
                 team_name: "Orange Team",
@@ -167,7 +164,6 @@ pub(crate) fn PlayerSummaryGridLoading(progress: ProgressState) -> Element {
                 loading: true,
                 players_complete: vec![],
                 player_names_loading: orange_names,
-                lobby_median_mmr: 0.0,
             }
         }
     }
@@ -200,7 +196,6 @@ fn TeamSummaryCard(
     loading: bool,
     players_complete: Vec<PlayerAverage>,
     player_names_loading: Vec<String>,
-    lobby_median_mmr: f32,
 ) -> Element {
     let roast_label = predicted_rank_roast_label();
     let border_color = if team_color == "blue" {
@@ -254,17 +249,22 @@ fn TeamSummaryCard(
                                     "{player.name}"
                                 }
                                 p { class: "text-sm text-gray-500", "{player.rank}" }
+                                if let Some(plays_like) = &player.plays_like {
+                                    p { class: "text-sm font-semibold text-red-400",
+                                        "Plays like {plays_like}"
+                                    }
+                                }
                                 if let Some(roast) = &player.next_rank_roast {
                                     p { class: "text-xs italic text-gray-400 leading-snug", "{roast}" }
                                 }
                             }
-                            if player_looks_high_for_lobby(player.mmr, lobby_median_mmr) {
+                            if let Some(reason) = player.smurf {
                                 div { class: "flex shrink-0 items-center justify-center gap-2 sm:gap-3",
                                     LobbyAlertTriangleIcon {}
                                     img {
                                         src: SMURF_SUSPECT_BADGE,
-                                        alt: "Predicted rank is much higher than lobby",
-                                        title: "Predicted rank is much higher than lobby",
+                                        alt: smurf_badge_text(reason),
+                                        title: smurf_badge_text(reason),
                                         class: "h-14 w-auto max-w-[5rem] sm:h-[4.5rem] sm:max-w-[6rem] object-contain",
                                     }
                                     LobbyAlertTriangleIcon {}

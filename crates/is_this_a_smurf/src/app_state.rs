@@ -26,6 +26,10 @@ pub(crate) struct PlayerAverage {
     pub(crate) rank: RankDivision,
     /// One-line roast: what the next rank up does better.
     pub(crate) next_rank_roast: Option<String>,
+    /// Why the player is flagged as a smurf, if they are.
+    pub(crate) smurf: Option<skill_model::SmurfReason>,
+    /// The rank their own stats play like, when that is why they are flagged.
+    pub(crate) plays_like: Option<RankDivision>,
 }
 
 /// Status of a single step in the pipeline.

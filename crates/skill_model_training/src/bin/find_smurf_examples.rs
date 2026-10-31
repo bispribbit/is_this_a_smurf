@@ -1,15 +1,16 @@
 #![expect(
     clippy::indexing_slicing,
-    reason = "slot arrays indexed by slots below TOTAL_SLOTS"
+    reason = "slot arrays indexed by slots below TOTAL_SLOTS, tier names by tier_index"
 )]
 
-//! Smurf examples for a playlist: evaluation replays where the shipped bundle flags a player
-//! (prediction over the lobby median prediction by `--margin`, by default the app's
-//! [`SMURF_MARGIN_OVER_LOBBY_MEDIAN_MMR`]), biggest margin first.
+//! Smurf examples for a playlist: every player the shipped bundle flags
+//! ([`skill_model::smurf_suspicions`], the app's rule) in the evaluation replays, those
+//! who play furthest above their lobby first.
 //!
 //! A flag is *confirmed* when the player's own label is also at least
 //! [`PROXY_POSITIVE_MARGIN_MMR`] over the lobby's median label (mostly a stronger friend in
-//! a party), the only smurf-like case where the truth is known.
+//! a party). A smurf's label is the smurf account's rank, so most real smurfs show as
+//! labelled with the lobby: compare the label with what they play like.
 //!
 //! Usage:
 //!   cargo run --release -p skill_model_training --bin find_smurf_examples -- --players-per-team 1
@@ -18,8 +19,8 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use feature_extractor::TOTAL_SLOTS;
-use skill_model::{SMURF_MARGIN_OVER_LOBBY_MEDIAN_MMR, SkillModelBundle};
+use skill_model::coaching::tier_index;
+use skill_model::{SkillModelBundle, SmurfReason, smurf_suspicions};
 use skill_model_training::dataset::{Lobby, Partition, read_lobbies};
 use skill_model_training::evaluation::PROXY_POSITIVE_MARGIN_MMR;
 use uuid::Uuid;
@@ -37,34 +38,46 @@ struct Args {
     #[arg(long)]
     players_per_team: usize,
 
-    /// Flag margin over the lobby median prediction (defaults to the app's).
-    #[arg(long, default_value_t = SMURF_MARGIN_OVER_LOBBY_MEDIAN_MMR)]
-    margin: f32,
-
     /// How many examples to print.
     #[arg(long, default_value_t = 15)]
     count: usize,
 }
 
+/// Rank names by tier index.
+const TIER_NAMES: [&str; 22] = [
+    "B1", "B2", "B3", "S1", "S2", "S3", "G1", "G2", "G3", "P1", "P2", "P3", "D1", "D2", "D3", "C1",
+    "C2", "C3", "GC1", "GC2", "GC3", "SSL",
+];
+
 /// One flagged player.
 struct FlaggedPlayer {
     replay_id: Uuid,
     slot: usize,
-    prediction_mmr: f32,
-    /// Prediction minus the lobby's median prediction.
-    margin_mmr: f32,
+    reason: SmurfReason,
+    match_mmr: f32,
+    plays_like_mmr: f32,
+    /// Plays-like divisions over the lobby's lowest plays-like division.
+    divisions_over_lowest: usize,
     /// Label MMR; `0` when unknown.
     label_mmr: f32,
     /// Label minus the lobby's median label, when at least two labels are known.
     label_margin_mmr: Option<f32>,
-    /// Every present player's label, by slot.
-    lobby_labels: Vec<f32>,
+    /// Every present player's label tier, in slot order.
+    lobby_labels: Vec<&'static str>,
 }
 
 impl FlaggedPlayer {
     fn confirmed(&self) -> bool {
         self.label_margin_mmr
             .is_some_and(|margin| margin >= PROXY_POSITIVE_MARGIN_MMR)
+    }
+}
+
+fn tier_name(mmr: f32) -> &'static str {
+    if mmr > 0.0 {
+        TIER_NAMES[tier_index(mmr)]
+    } else {
+        "?"
     }
 }
 
@@ -80,38 +93,47 @@ fn median(values: &mut [f32]) -> f32 {
     }
 }
 
-fn flagged_players(lobby: &Lobby, bundle: &SkillModelBundle, margin: f32) -> Vec<FlaggedPlayer> {
-    let predictions = bundle.match_model.predict_stats(&lobby.stat_references());
-    let mut present: Vec<f32> = predictions.iter().flatten().copied().collect();
-    if present.len() < 2 {
-        return Vec::new();
-    }
-    let prediction_median = median(&mut present);
+fn flagged_players(lobby: &Lobby, bundle: &SkillModelBundle) -> Vec<FlaggedPlayer> {
+    let stats = lobby.stat_references();
+    let match_mmr = bundle.match_model.predict_stats(&stats);
+    let plays_like_mmr = bundle.plays_like_model.predict_stats(&stats);
+    let flags = smurf_suspicions(&match_mmr, &plays_like_mmr);
+    let lowest_tier = plays_like_mmr
+        .iter()
+        .flatten()
+        .map(|&mmr| tier_index(mmr))
+        .min()
+        .unwrap_or(0);
     let mut labels: Vec<f32> = lobby
         .labelled_slots()
         .map(|slot| lobby.targets[slot])
         .collect();
     let label_median = (labels.len() >= 2).then(|| median(&mut labels));
-    (0..TOTAL_SLOTS)
-        .filter_map(|slot| {
-            let prediction_mmr = predictions[slot]?;
-            let margin_mmr = prediction_mmr - prediction_median;
-            (margin_mmr > margin).then(|| {
-                let label_mmr = lobby.targets[slot];
-                FlaggedPlayer {
-                    replay_id: lobby.replay_id,
-                    slot,
-                    prediction_mmr,
-                    margin_mmr,
-                    label_mmr,
-                    label_margin_mmr: label_median
-                        .filter(|_| label_mmr > 0.0)
-                        .map(|median| label_mmr - median),
-                    lobby_labels: (0..TOTAL_SLOTS)
-                        .filter(|&other| lobby.stats[other].is_some())
-                        .map(|other| lobby.targets[other])
-                        .collect(),
-                }
+    flags
+        .iter()
+        .enumerate()
+        .filter_map(|(slot, flag)| {
+            let reason = (*flag)?;
+            let label_mmr = lobby.targets[slot];
+            let plays_like_mmr = plays_like_mmr[slot]?;
+            Some(FlaggedPlayer {
+                replay_id: lobby.replay_id,
+                slot,
+                reason,
+                match_mmr: match_mmr[slot]?,
+                plays_like_mmr,
+                divisions_over_lowest: tier_index(plays_like_mmr).saturating_sub(lowest_tier),
+                label_mmr,
+                label_margin_mmr: label_median
+                    .filter(|_| label_mmr > 0.0)
+                    .map(|median| label_mmr - median),
+                lobby_labels: lobby
+                    .stats
+                    .iter()
+                    .zip(&lobby.targets)
+                    .filter(|(stats, _)| stats.is_some())
+                    .map(|(_, &target)| tier_name(target))
+                    .collect(),
             })
         })
         .collect()
@@ -134,63 +156,47 @@ fn main() -> Result<()> {
 
     let mut flagged: Vec<FlaggedPlayer> = lobbies
         .iter()
-        .flat_map(|lobby| flagged_players(lobby, &bundle, args.margin))
+        .flat_map(|lobby| flagged_players(lobby, &bundle))
         .collect();
     let players: usize = lobbies
         .iter()
         .map(|lobby| lobby.stats.iter().flatten().count())
         .sum();
-    // Players whose label alone makes them smurf-like, flagged or not.
-    let positives: usize = lobbies
+    let plays_above = flagged
         .iter()
-        .map(|lobby| {
-            let mut labels: Vec<f32> = lobby
-                .labelled_slots()
-                .map(|slot| lobby.targets[slot])
-                .collect();
-            if labels.len() < 2 {
-                return 0;
-            }
-            let label_median = median(&mut labels.clone());
-            labels.retain(|label| label - label_median >= PROXY_POSITIVE_MARGIN_MMR);
-            labels.len()
-        })
-        .sum();
-    let confirmed = flagged.iter().filter(|player| player.confirmed()).count();
-    let checkable = flagged
-        .iter()
-        .filter(|player| player.label_margin_mmr.is_some())
+        .filter(|player| player.reason == SmurfReason::PlaysAboveLobby)
         .count();
+    let confirmed = flagged.iter().filter(|player| player.confirmed()).count();
     println!(
-        "{} evaluation replays, {players} players, {positives} ranked ≥{PROXY_POSITIVE_MARGIN_MMR} over their lobby: {} flagged at +{}, {confirmed} of {checkable} with known labels confirmed",
+        "{} evaluation replays, {players} players: {} flagged ({plays_above} play above the lobby, {} ranked above it), {confirmed} confirmed by labels",
         lobbies.len(),
         flagged.len(),
-        args.margin,
+        flagged.len() - plays_above,
     );
 
-    // Confirmed first, then the biggest margins.
     flagged.sort_by(|left, right| {
         right
-            .confirmed()
-            .cmp(&left.confirmed())
-            .then(right.margin_mmr.total_cmp(&left.margin_mmr))
+            .divisions_over_lowest
+            .cmp(&left.divisions_over_lowest)
+            .then(right.plays_like_mmr.total_cmp(&left.plays_like_mmr))
     });
     for player in flagged.iter().take(args.count) {
-        let label_margin = player
-            .label_margin_mmr
-            .map_or_else(|| "?".to_string(), |margin| format!("{margin:+.0}"));
         println!(
-            "  {} {} slot {}  predicted {:.0} ({:+.0} over lobby)  label {:.0} ({label_margin} over lobby)  lobby labels {:?}",
-            if player.confirmed() {
-                "CONFIRMED"
-            } else {
-                "flagged  "
-            },
+            "  {} slot {}  {:<10} card {:<3} plays like {:<3}  label {:<3}{}  lobby labels {:?}",
             player.replay_id,
             player.slot,
-            player.prediction_mmr,
-            player.margin_mmr,
-            player.label_mmr,
+            match player.reason {
+                SmurfReason::RankedAboveLobby => "ranked",
+                SmurfReason::PlaysAboveLobby => "plays",
+            },
+            tier_name(player.match_mmr),
+            tier_name(player.plays_like_mmr),
+            tier_name(player.label_mmr),
+            if player.confirmed() {
+                " (confirmed)"
+            } else {
+                ""
+            },
             player.lobby_labels,
         );
     }

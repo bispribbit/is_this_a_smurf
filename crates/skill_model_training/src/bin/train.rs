@@ -5,10 +5,13 @@
 
 //! Trains the shipped skill model bundle and reports how good it is.
 //!
-//! 1. Whole-match model (verdict + cards) on `extract_stats`'s match CSV.
-//! 2. Window model (timeline) on the window CSV, plus the timeline emphasis.
-//! 3. Coaching table (the "next rank" roast) from the training players.
-//! 4. Writes `data/skill_model.bin` and checks that it reloads to identical predictions.
+//! 1. Label cleaning: drops training labels far below an out-of-fold plays-like prediction
+//!    (likely smurf accounts; see [`skill_model_training::label_cleaning`]).
+//! 2. Whole-match model (cards) on `extract_stats`'s match CSV.
+//! 3. Plays-like model (own stats only) and the smurf flag it feeds.
+//! 4. Window model (timeline) on the window CSV, plus the timeline emphasis.
+//! 5. Coaching table (the "next rank" roast) from the training players.
+//! 6. Writes `data/skill_model.bin` and checks that it reloads to identical predictions.
 //!
 //! Every metric is computed on the database's evaluation split, which no part of training
 //! sees, per playlist (duels, doubles, standard). One model serves all three: the
@@ -25,15 +28,22 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use feature_extractor::MATCH_STAT_COUNT;
 use skill_model::coaching::{COACHING_TIPS, CoachingTable, CoachingTables, tier_index};
-use skill_model::{SMURF_MARGIN_OVER_LOBBY_MEDIAN_MMR, SkillModelBundle, TabularLayout};
+use skill_model::{
+    PlaysLikeModel, SMURF_MARGIN_OVER_LOBBY_MEDIAN_MMR, SkillModelBundle, SmurfReason,
+    TabularLayout, TabularSkillModel, smurf_suspicions,
+};
 use skill_model_training::coaching_table::build_coaching_tables;
 use skill_model_training::dataset::{
     Lobby, Partition, ScoredPlayer, evaluate, read_lobbies, train_model,
 };
 use skill_model_training::evaluation::{
-    MINIMUM_PLAYERS_PER_LOBBY, PlayerPrediction, compute_lobby_metrics_with_minimum, flag_metrics,
+    MINIMUM_PLAYERS_PER_LOBBY, PROXY_POSITIVE_MARGIN_MMR, PlayerPrediction,
+    compute_lobby_metrics_with_minimum, flag_metrics,
 };
 use skill_model_training::gradient_boosting::GradientBoostingConfig;
+use skill_model_training::label_cleaning::{
+    CLEAN_MARGIN_MMR, CleanedLabels, clean_labels, out_of_fold_plays_like, train_plays_like_model,
+};
 use uuid::Uuid;
 
 #[derive(Parser, Debug)]
@@ -144,6 +154,72 @@ fn print_playlist_metrics(lobbies: &[Lobby], model: &skill_model::TabularSkillMo
             &format!("evaluation {}", playlist.name),
             &predictions,
             playlist.minimum_players_per_lobby(),
+        );
+    }
+}
+
+/// The shipped smurf flag on each playlist's evaluation split: how often it fires, why, and
+/// how many label-based party positives (ranked ≥ 150 over their lobby) it confirms.
+fn print_smurf_report(
+    lobbies: &[Lobby],
+    match_model: &TabularSkillModel,
+    plays_like_model: &PlaysLikeModel,
+) {
+    for playlist in &PLAYLISTS {
+        let mut players = 0usize;
+        let mut ranked_above = 0usize;
+        let mut plays_above = 0usize;
+        let mut positives = 0usize;
+        let mut flagged_positives = 0usize;
+        for lobby in lobbies.iter().filter(|lobby| {
+            lobby.partition == Partition::Evaluation
+                && lobby.players_per_team() == Some(playlist.players_per_team)
+        }) {
+            let stats = lobby.stat_references();
+            let flags = smurf_suspicions(
+                &match_model.predict_stats(&stats),
+                &plays_like_model.predict_stats(&stats),
+            );
+            let mut labels: Vec<f32> = lobby
+                .labelled_slots()
+                .map(|slot| lobby.targets[slot])
+                .collect();
+            labels.sort_by(f32::total_cmp);
+            let label_median = (labels.len() >= 2).then(|| {
+                let middle = labels.len() / 2;
+                if labels.len().is_multiple_of(2) {
+                    f32::midpoint(labels[middle - 1], labels[middle])
+                } else {
+                    labels[middle]
+                }
+            });
+            for (slot, flag) in flags.iter().enumerate() {
+                if lobby.stats[slot].is_none() {
+                    continue;
+                }
+                players += 1;
+                match flag {
+                    Some(SmurfReason::RankedAboveLobby) => ranked_above += 1,
+                    Some(SmurfReason::PlaysAboveLobby) => plays_above += 1,
+                    None => {}
+                }
+                let positive = lobby.targets[slot] > 0.0
+                    && label_median.is_some_and(|median| {
+                        lobby.targets[slot] - median >= PROXY_POSITIVE_MARGIN_MMR
+                    });
+                positives += usize::from(positive);
+                flagged_positives += usize::from(positive && flag.is_some());
+            }
+        }
+        if players == 0 {
+            continue;
+        }
+        println!(
+            "  {:<9} flags {:.2}% of players ({:.2}% ranked above the lobby, {:.2}% play above it)  party positives caught {flagged_positives}/{positives}",
+            playlist.name,
+            100.0 * (ranked_above + plays_above) as f64 / players as f64,
+            100.0 * ranked_above as f64 / players as f64,
+            100.0 * plays_above as f64 / players as f64,
         );
     }
 }
@@ -319,15 +395,27 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    println!(
+        "== label cleaning (labels ≥ {CLEAN_MARGIN_MMR} MMR below an out-of-fold plays-like prediction)"
+    );
+    let raw_match_lobbies = read_lobbies(&args.match_stats)?;
+    let out_of_fold = out_of_fold_plays_like(&raw_match_lobbies, &config);
+    let CleanedLabels {
+        lobbies: match_lobbies,
+        dropped,
+        counts,
+    } = clean_labels(&raw_match_lobbies, &out_of_fold, CLEAN_MARGIN_MMR);
+    drop(raw_match_lobbies);
+    counts.print_report();
+
     println!("== whole-match model ({})", args.match_stats.display());
-    let match_lobbies = read_lobbies(&args.match_stats)?;
     let match_model = train_model(&match_lobbies, &layout, &config);
     let match_scored = evaluate(&match_lobbies, &match_model);
     let match_predictions: Vec<PlayerPrediction> =
         match_scored.iter().map(|s| s.prediction).collect();
     print_playlist_metrics(&match_lobbies, &match_model);
     println!(
-        "  smurf flag (prediction > lobby median + margin) vs players ranked ≥150 over their lobby:"
+        "  ranked-above-the-lobby rule (prediction > lobby median + margin) vs players ranked ≥150 over their lobby:"
     );
     for margin in [50.0, 75.0, 100.0, 150.0, 200.0] {
         let flags = flag_metrics(&match_predictions, margin);
@@ -344,12 +432,17 @@ fn main() -> Result<()> {
         );
     }
 
+    println!("== plays-like model and smurf flag (evaluation split)");
+    let plays_like_model = train_plays_like_model(&match_lobbies, &config);
+    print_smurf_report(&match_lobbies, &match_model, &plays_like_model);
+
     println!(
         "== window model ({}, {} s windows)",
         args.window_stats.display(),
         args.window_seconds
     );
-    let window_lobbies = read_lobbies(&args.window_stats)?;
+    let mut window_lobbies = read_lobbies(&args.window_stats)?;
+    dropped.apply(&mut window_lobbies);
     let window_model = train_model(&window_lobbies, &layout, &config);
     let window_scored = evaluate(&window_lobbies, &window_model);
     let swing = typical_form_swing(&window_scored);
@@ -366,6 +459,7 @@ fn main() -> Result<()> {
     let bundle = SkillModelBundle {
         match_model,
         window_model,
+        plays_like_model,
         window_seconds: args.window_seconds,
         timeline_emphasis,
         coaching,
@@ -386,11 +480,25 @@ fn main() -> Result<()> {
             .collect();
     // Leaf values are quantised to 16 bits on disk, so predictions move by a hair; anything
     // visible means the encoding is broken.
+    let largest_plays_like_change = match_lobbies
+        .iter()
+        .filter(|lobby| lobby.partition == Partition::Evaluation)
+        .flat_map(|lobby| {
+            let stats = lobby.stat_references();
+            let before = bundle.plays_like_model.predict_stats(&stats);
+            let after = reloaded.plays_like_model.predict_stats(&stats);
+            before
+                .into_iter()
+                .zip(after)
+                .filter_map(|(before, after)| Some((before? - after?).abs()))
+                .collect::<Vec<f32>>()
+        })
+        .fold(0.0_f32, f32::max);
     let largest_change = reloaded_predictions
         .iter()
         .zip(&match_predictions)
         .map(|(a, b)| (a.prediction_mmr - b.prediction_mmr).abs())
-        .fold(0.0_f32, f32::max);
+        .fold(largest_plays_like_change, f32::max);
     anyhow::ensure!(
         largest_change < MAXIMUM_RELOAD_CHANGE_MMR,
         "reloaded bundle predicts differently (by up to {largest_change:.3} MMR)"

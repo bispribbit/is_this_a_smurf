@@ -5,7 +5,9 @@
 
 //! Turns a parsed replay into everything the app shows.
 //!
-//! * **Whole-match scores** come from the match model — the verdict and the cards.
+//! * **Whole-match scores** come from the match model — the cards.
+//! * **Smurf flags** compare the match model and the plays-like model with the lobby
+//!   ([`crate::smurf_suspicions`]) — the badges and the verdict.
 //! * **The timeline** shows *form*: each player's whole-match score, moved up or down by how
 //!   much better or worse they did in a window than in their own average window, times
 //!   [`SkillModelBundle::timeline_emphasis`]. Window-level lobby estimates jump by ±100 MMR
@@ -23,6 +25,7 @@ use replay_structs::{ParsedReplay, Team};
 
 use crate::SkillModelBundle;
 use crate::coaching::CoachingAdvice;
+use crate::smurf::{SmurfReason, smurf_suspicions};
 
 /// Players with less live time than this in a window get no timeline score there. Same
 /// cut-off the window model was trained with.
@@ -50,6 +53,10 @@ pub struct MatchAnalysis {
     pub names: [String; TOTAL_SLOTS],
     /// Whole-match MMR per slot.
     pub match_mmr: [Option<f32>; TOTAL_SLOTS],
+    /// MMR each player's own stats play like, per slot.
+    pub plays_like_mmr: [Option<f32>; TOTAL_SLOTS],
+    /// Why each slot is flagged as a smurf, if it is.
+    pub smurf: [Option<SmurfReason>; TOTAL_SLOTS],
     /// Roast per slot.
     pub coaching: [Option<CoachingAdvice>; TOTAL_SLOTS],
     /// Timeline windows in order.
@@ -89,6 +96,8 @@ impl SkillModelBundle {
             }
         }
         let match_mmr = self.match_model.predict(&match_stats);
+        let plays_like_mmr = self.plays_like_model.predict(&match_stats);
+        let smurf = smurf_suspicions(&match_mmr, &plays_like_mmr);
         let coaching_table = self
             .coaching
             .for_players_per_team(parsed.match_format.players_per_team);
@@ -100,6 +109,8 @@ impl SkillModelBundle {
         MatchAnalysis {
             names: roster.names,
             match_mmr,
+            plays_like_mmr,
+            smurf,
             coaching,
             timeline,
         }
