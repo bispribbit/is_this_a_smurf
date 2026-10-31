@@ -3,20 +3,22 @@
     reason = "slot arrays indexed by slots below TOTAL_SLOTS, stat arrays by stat indices"
 )]
 
-//! Which stats should the plays-like model (the smurf flag's own-stats score) see?
+//! How many label cleaning rounds should the plays-like model (the smurf flag's own-stats
+//! score) train on, and should the other players be scored half by the whole-match model?
 //!
-//! For each variant (every stat, or only [`OPPONENT_INDEPENDENT_STATS`]) this trains the
-//! plays-like model the way `train` does: out-of-fold scores, label cleaning, then a model
-//! on the cleaned labels. It then flags players whose plays-like division is more than N
-//! divisions over the median of the other players, on each playlist's evaluation split,
-//! against:
+//! For each variant this cleans the labels the way `train` does (out-of-fold scores on
+//! every own stat, repeated per round), trains the plays-like model on the
+//! [`OPPONENT_INDEPENDENT_STATS`], and flags players whose plays-like division is more than
+//! N divisions over the median of the other players, on each playlist's evaluation split.
+//! The blended variants score the others with the midpoint of their plays-like division and
+//! the shipped bundle's whole-match division. Flags are measured against:
 //!
 //! - **mechanical smurfs**: labelled Gold II or lower, Champion I mechanics on most aerial
-//!   stats, and their team won by at least two. Both variants see these stats, so this set
-//!   favours them, the opponent-independent one most;
+//!   stats, and their team won by at least two. The plays-like model sees these stats, so
+//!   this set favours it;
 //! - **dominant smurfs**: labelled Gold II or lower, their team won by at least three, and
 //!   they had the most possession and touches in the lobby. Built only from stats the
-//!   opponent-independent variant never sees;
+//!   plays-like model never sees;
 //! - **party positives**, the label-based proxy (label ≥ 150 over the lobby's median);
 //! - where the flags land: a flag on a Diamond-or-higher label is most likely wrong.
 //!
@@ -26,16 +28,16 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use feature_extractor::{MATCH_STAT_NAMES, SLOTS_PER_TEAM, TOTAL_SLOTS};
 use skill_model::coaching::tier_index;
-use skill_model::{OPPONENT_INDEPENDENT_STATS, PlaysLikeModel, TabularLayout};
+use skill_model::{OPPONENT_INDEPENDENT_STATS, PlaysLikeModel, SkillModelBundle};
 use skill_model_training::dataset::{Lobby, Partition, read_lobbies};
 use skill_model_training::evaluation::PROXY_POSITIVE_MARGIN_MMR;
 use skill_model_training::gradient_boosting::GradientBoostingConfig;
 use skill_model_training::label_cleaning::{
-    SlotScores, clean_labels, out_of_fold_plays_like, train_plays_like_model,
+    SlotScores, clean_labels_in_rounds, train_plays_like_model,
 };
 use uuid::Uuid;
 
@@ -44,6 +46,10 @@ use uuid::Uuid;
 struct Args {
     #[arg(long, default_value = "data/match_stats.csv")]
     match_stats: PathBuf,
+
+    /// Shipped bundle, for the whole-match model the blended variants score opponents with.
+    #[arg(long, default_value = "data/skill_model.bin")]
+    bundle: PathBuf,
 
     /// Training labels this far below the player's out-of-fold plays-like prediction are
     /// dropped as likely smurfs.
@@ -118,6 +124,9 @@ const PLAYLISTS: [Playlist; 3] = [
 struct Scorer {
     name: &'static str,
     scores: HashMap<Uuid, SlotScores>,
+    /// What the other players are scored with when computing a player's margin; their own
+    /// `scores` when absent.
+    baseline: Option<HashMap<Uuid, SlotScores>>,
     /// Flag margins to report, in divisions.
     margins: Vec<f32>,
 }
@@ -125,7 +134,11 @@ struct Scorer {
 /// One plays-like variant under test.
 struct Variant {
     name: &'static str,
-    layout: TabularLayout,
+    /// Label cleaning rounds before the plays-like model is trained.
+    cleaning_rounds: usize,
+    /// Score the other players with the midpoint of their plays-like and whole-match
+    /// divisions instead of plays-like alone.
+    blend_others_with_match_model: bool,
 }
 
 fn stat_index(name: &str) -> usize {
@@ -254,7 +267,20 @@ fn evaluated_players(
             .iter()
             .filter_map(|scorer| scorer.scores.get(&lobby.replay_id))
             .collect();
-        if lobby_scores.len() != scorers.len() || lobby.stats.iter().flatten().count() < 2 {
+        let baseline_scores: Vec<&SlotScores> = scorers
+            .iter()
+            .filter_map(|scorer| {
+                scorer
+                    .baseline
+                    .as_ref()
+                    .unwrap_or(&scorer.scores)
+                    .get(&lobby.replay_id)
+            })
+            .collect();
+        if lobby_scores.len() != scorers.len()
+            || baseline_scores.len() != scorers.len()
+            || lobby.stats.iter().flatten().count() < 2
+        {
             continue;
         }
         let mut labels: Vec<f32> = lobby
@@ -283,11 +309,11 @@ fn evaluated_players(
                     .map(|median| label - median >= PROXY_POSITIVE_MARGIN_MMR),
                 // Over the median of the *other* players: in a duel the lobby median is half
                 // way to the smurf, which halves their margin.
-                margins: lobby_scores
+                margins: baseline_scores
                     .iter()
                     .zip(&scores)
-                    .map(|(lobby_scores, score)| {
-                        let mut others: Vec<f32> = lobby_scores
+                    .map(|(baseline_scores, score)| {
+                        let mut others: Vec<f32> = baseline_scores
                             .iter()
                             .enumerate()
                             .filter(|(other, _)| *other != slot)
@@ -408,22 +434,60 @@ fn print_accuracy(lobbies: &[Lobby], model: &PlaysLikeModel) {
     }
 }
 
+/// The plays-like model on labels cleaned `rounds` times.
+fn cleaned_plays_like_model(
+    lobbies: &[Lobby],
+    rounds: usize,
+    margin: f32,
+    config: &GradientBoostingConfig,
+) -> PlaysLikeModel {
+    let cleaned = clean_labels_in_rounds(
+        lobbies,
+        &PlaysLikeModel::own_stats_layout(),
+        config,
+        rounds,
+        margin,
+    );
+    train_plays_like_model(
+        &cleaned.lobbies,
+        &PlaysLikeModel::opponent_independent_layout(),
+        config,
+    )
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     let config = GradientBoostingConfig::default();
     let lobbies = read_lobbies(&args.match_stats)?;
+    let bundle = SkillModelBundle::from_bytes(
+        &std::fs::read(&args.bundle)
+            .with_context(|| format!("reading {}", args.bundle.display()))?,
+    )
+    .map_err(|error| anyhow::anyhow!("decoding bundle: {error}"))?;
     let variants = [
         Variant {
-            name: "all stats",
-            layout: PlaysLikeModel::own_stats_layout(),
+            name: "1 round",
+            cleaning_rounds: 1,
+            blend_others_with_match_model: false,
         },
         Variant {
-            name: "independent",
-            layout: PlaysLikeModel::opponent_independent_layout(),
+            name: "1 rnd blend",
+            cleaning_rounds: 1,
+            blend_others_with_match_model: true,
+        },
+        Variant {
+            name: "2 rounds",
+            cleaning_rounds: 2,
+            blend_others_with_match_model: false,
+        },
+        Variant {
+            name: "2 rnd blend",
+            cleaning_rounds: 2,
+            blend_others_with_match_model: true,
         },
     ];
     println!(
-        "opponent-independent variant: {} of {} stats",
+        "opponent-independent plays-like model: {} of {} stats",
         OPPONENT_INDEPENDENT_STATS.len(),
         MATCH_STAT_NAMES.len()
     );
@@ -432,29 +496,65 @@ fn main() -> Result<()> {
         .iter()
         .filter(|lobby| lobby.partition == Partition::Evaluation)
         .collect();
+    let match_tiers: HashMap<Uuid, SlotScores> = evaluation
+        .iter()
+        .map(|lobby| {
+            (
+                lobby.replay_id,
+                as_tiers(bundle.match_model.predict_stats(&lobby.stat_references())),
+            )
+        })
+        .collect();
+    let mut models_by_rounds: HashMap<usize, PlaysLikeModel> = HashMap::new();
     let mut scorers = Vec::new();
     for variant in &variants {
-        println!(
-            "== {}: out-of-fold scores, label cleaning (≥ {} MMR), cleaned model",
-            variant.name, args.clean_margin
-        );
-        let out_of_fold = out_of_fold_plays_like(&lobbies, &variant.layout, &config);
-        let cleaned = clean_labels(&lobbies, &out_of_fold, args.clean_margin);
-        cleaned.counts.print_report();
-        let model = train_plays_like_model(&cleaned.lobbies, &variant.layout, &config);
-        print_accuracy(&lobbies, &model);
+        if let std::collections::hash_map::Entry::Vacant(vacant) =
+            models_by_rounds.entry(variant.cleaning_rounds)
+        {
+            println!(
+                "== {} cleaning round(s) (≥ {} MMR)",
+                variant.cleaning_rounds, args.clean_margin
+            );
+            let model = cleaned_plays_like_model(
+                &lobbies,
+                variant.cleaning_rounds,
+                args.clean_margin,
+                &config,
+            );
+            print_accuracy(&lobbies, &model);
+            vacant.insert(model);
+        }
+        let Some(model) = models_by_rounds.get(&variant.cleaning_rounds) else {
+            continue;
+        };
+        let scores: HashMap<Uuid, SlotScores> = evaluation
+            .iter()
+            .map(|lobby| {
+                (
+                    lobby.replay_id,
+                    as_tiers(model.predict_stats(&lobby.stat_references())),
+                )
+            })
+            .collect();
+        let baseline = variant.blend_others_with_match_model.then(|| {
+            scores
+                .iter()
+                .filter_map(|(replay_id, plays_like)| {
+                    let match_model = match_tiers.get(replay_id)?;
+                    let blended: SlotScores = core::array::from_fn(|slot| {
+                        plays_like[slot]
+                            .zip(match_model[slot])
+                            .map(|(plays_like, match_model)| f32::midpoint(plays_like, match_model))
+                    });
+                    Some((*replay_id, blended))
+                })
+                .collect()
+        });
         scorers.push(Scorer {
             name: variant.name,
             margins: args.tier_margins.clone(),
-            scores: evaluation
-                .iter()
-                .map(|lobby| {
-                    (
-                        lobby.replay_id,
-                        as_tiers(model.predict_stats(&lobby.stat_references())),
-                    )
-                })
-                .collect(),
+            scores,
+            baseline,
         });
     }
 

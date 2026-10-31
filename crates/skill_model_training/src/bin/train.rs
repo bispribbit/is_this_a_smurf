@@ -42,7 +42,8 @@ use skill_model_training::evaluation::{
 };
 use skill_model_training::gradient_boosting::GradientBoostingConfig;
 use skill_model_training::label_cleaning::{
-    CLEAN_MARGIN_MMR, CleanedLabels, clean_labels, out_of_fold_plays_like, train_plays_like_model,
+    CLEAN_MARGIN_MMR, CleanedLabels, MATCH_MODEL_CLEANING_ROUNDS, PLAYS_LIKE_CLEANING_ROUNDS,
+    clean_labels_in_rounds, train_plays_like_model,
 };
 use uuid::Uuid;
 
@@ -402,18 +403,22 @@ fn main() -> Result<()> {
     let raw_match_lobbies = read_lobbies(&args.match_stats)?;
     // Cleaning uses every stat (the better rank estimate); the shipped plays-like model
     // sees only opponent-independent stats (the better smurf flag). See docs/model.md.
-    let out_of_fold = out_of_fold_plays_like(
-        &raw_match_lobbies,
-        &PlaysLikeModel::own_stats_layout(),
-        &config,
-    );
     let CleanedLabels {
         lobbies: match_lobbies,
         dropped,
         counts,
-    } = clean_labels(&raw_match_lobbies, &out_of_fold, CLEAN_MARGIN_MMR);
+    } = clean_labels_in_rounds(
+        &raw_match_lobbies,
+        &PlaysLikeModel::own_stats_layout(),
+        &config,
+        MATCH_MODEL_CLEANING_ROUNDS,
+        CLEAN_MARGIN_MMR,
+    );
     drop(raw_match_lobbies);
-    counts.print_report();
+    if MATCH_MODEL_CLEANING_ROUNDS > 1 {
+        println!("  all rounds:");
+        counts.print_report();
+    }
 
     println!("== whole-match model ({})", args.match_stats.display());
     let match_model = train_model(&match_lobbies, &layout, &config);
@@ -440,8 +445,17 @@ fn main() -> Result<()> {
     }
 
     println!("== plays-like model and smurf flag (evaluation split)");
-    let plays_like_model = train_plays_like_model(
+    println!("  further cleaning for the plays-like model:");
+    let plays_like_lobbies = clean_labels_in_rounds(
         &match_lobbies,
+        &PlaysLikeModel::own_stats_layout(),
+        &config,
+        PLAYS_LIKE_CLEANING_ROUNDS - MATCH_MODEL_CLEANING_ROUNDS,
+        CLEAN_MARGIN_MMR,
+    )
+    .lobbies;
+    let plays_like_model = train_plays_like_model(
+        &plays_like_lobbies,
         &PlaysLikeModel::opponent_independent_layout(),
         &config,
     );

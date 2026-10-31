@@ -26,6 +26,14 @@ use crate::gradient_boosting::GradientBoostingConfig;
 /// A label this far below the player's out-of-fold plays-like prediction is dropped.
 pub const CLEAN_MARGIN_MMR: f32 = 300.0;
 
+/// Cleaning rounds before the match and window models train. A second round cost duels a
+/// quarter of its within-lobby correlation.
+pub const MATCH_MODEL_CLEANING_ROUNDS: usize = 1;
+
+/// Cleaning rounds before the plays-like model trains: the second round lets it catch
+/// smurfs the first round's models had learned to see as normal low-rank play.
+pub const PLAYS_LIKE_CLEANING_ROUNDS: usize = 2;
+
 /// Folds for the out-of-fold predictions.
 const FOLDS: u64 = 2;
 
@@ -130,6 +138,23 @@ pub struct CleaningCounts {
 }
 
 impl CleaningCounts {
+    /// Adds another round's drops. Labels seen are kept from the first round.
+    fn add(&mut self, round: &Self) {
+        if self.labelled_by_playlist == [0; 3] {
+            self.labelled_by_playlist = round.labelled_by_playlist;
+        }
+        for (total, count) in self
+            .dropped_by_playlist
+            .iter_mut()
+            .zip(round.dropped_by_playlist)
+        {
+            *total += count;
+        }
+        for (total, count) in self.dropped_by_tier.iter_mut().zip(round.dropped_by_tier) {
+            *total += count;
+        }
+    }
+
     /// Prints how many labels were dropped, per playlist and per label tier.
     pub fn print_report(&self) {
         for (name, (dropped, labelled)) in ["duels", "doubles", "standard"].iter().zip(
@@ -155,6 +180,39 @@ impl CleaningCounts {
             .collect();
         println!("  dropped by label tier: {}", by_tier.join(", "));
     }
+}
+
+/// [`clean_labels`] repeated `rounds` times, each round scoring the labels left by the one
+/// before with a fresh out-of-fold model on `layout`. Prints each round's report.
+///
+/// A second round helps because the first round's models learned from the very smurf
+/// labels they are trying to find, which pulls their low-rank predictions down.
+#[must_use]
+pub fn clean_labels_in_rounds(
+    lobbies: &[Lobby],
+    layout: &TabularLayout,
+    config: &GradientBoostingConfig,
+    rounds: usize,
+    margin: f32,
+) -> CleanedLabels {
+    let mut cleaned = CleanedLabels {
+        lobbies: lobbies.to_vec(),
+        dropped: DroppedLabels::default(),
+        counts: CleaningCounts::default(),
+    };
+    for round in 1..=rounds {
+        println!("  round {round}:");
+        let out_of_fold = out_of_fold_plays_like(&cleaned.lobbies, layout, config);
+        let round_cleaned = clean_labels(&cleaned.lobbies, &out_of_fold, margin);
+        round_cleaned.counts.print_report();
+        cleaned.lobbies = round_cleaned.lobbies;
+        cleaned
+            .dropped
+            .players
+            .extend(round_cleaned.dropped.players);
+        cleaned.counts.add(&round_cleaned.counts);
+    }
+    cleaned
 }
 
 /// Drops every label at least `margin` below its out-of-fold plays-like prediction.

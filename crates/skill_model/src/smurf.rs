@@ -9,7 +9,8 @@
 //!   fires, because the labels it learned from hardly ever differ inside those lobbies;
 //! * **plays above the others** — the rank their own stats play like
 //!   ([`crate::PlaysLikeModel`]) is more than [`smurf_margin_over_others_tiers`] divisions
-//!   over the median of the *other* players. Counted in divisions rather than MMR because
+//!   over the median of the *other* players, each scored half by their own plays-like
+//!   division and half by the whole-match prediction. Counted in divisions rather than MMR because
 //!   divisions are much wider at the top (in MMR, a third of these flags landed on
 //!   Diamond-and-up players), and against the others because in a duel the lobby median is
 //!   half way to the smurf, which halved their margin.
@@ -29,16 +30,17 @@ pub const SMURF_MARGIN_OVER_LOBBY_MEDIAN_MMR: f32 = 100.0;
 /// Divisions (tiers) over the other players' median plays-like division that a player
 /// must exceed to be flagged, for a playlist of `players_per_team`.
 ///
-/// Smaller lobbies compare against fewer players, so their median is noisier and needs a
-/// wider margin: more than five divisions in duels and doubles (from a Silver I opponent,
-/// playing like a Platinum I or higher), more than four in standard.
+/// More than five divisions in doubles (over others whose median is Silver I, playing
+/// like a Platinum I or higher), more than four in duels and standard. Doubles
+/// needs the wider margin: at four it flags ~8 % of players for few more smurfs. Duels'
+/// single opponent is noisy too, but blending the whole-match prediction into the others'
+/// score already steadies it.
 ///
 /// Set for recall: a smurf detector and coach would rather flag a strong player than miss a
-/// smurf. One division tighter flags a third fewer players but misses more smurfs; on the
-/// evaluation split this flags ~4 % of duels, ~5 % of doubles and ~4.5 % of standard players.
+/// smurf. `docs/model.md` has the flag rates and recall per margin.
 #[must_use]
 pub const fn smurf_margin_over_others_tiers(players_per_team: usize) -> f32 {
-    if players_per_team >= 3 { 4.0 } else { 5.0 }
+    if players_per_team == 2 { 5.0 } else { 4.0 }
 }
 
 /// Why a player is flagged.
@@ -78,15 +80,29 @@ pub fn smurf_suspicions(
         return [None; TOTAL_SLOTS];
     }
     let prediction_median = median(&mut predictions);
-    let tiers: [Option<f32>; TOTAL_SLOTS] =
-        plays_like_mmr.map(|mmr| mmr.map(|mmr| tier_index(mmr) as f32));
+    let tier = |mmr: f32| tier_index(mmr) as f32;
+    let tiers: [Option<f32>; TOTAL_SLOTS] = plays_like_mmr.map(|mmr| mmr.map(tier));
+    // The others are scored with the midpoint of what their own stats play like and the
+    // whole-match prediction, which reads the whole lobby: one opponent's off game then
+    // moves the baseline half as much (in duels, a third of the flags on Diamond-and-up
+    // players went away).
+    let others_tiers: [Option<f32>; TOTAL_SLOTS] = core::array::from_fn(|slot| {
+        let plays_like = tiers.get(slot).copied().flatten()?;
+        Some(
+            match_mmr
+                .get(slot)
+                .copied()
+                .flatten()
+                .map_or(plays_like, |mmr| f32::midpoint(plays_like, tier(mmr))),
+        )
+    });
     let tier_margin = smurf_margin_over_others_tiers(players_per_team);
     let mut flags = [None; TOTAL_SLOTS];
     for (slot, (flag, mmr)) in flags.iter_mut().zip(match_mmr).enumerate() {
         let ranked_above = mmr
             .zip(prediction_median)
             .is_some_and(|(mmr, median)| mmr > median + SMURF_MARGIN_OVER_LOBBY_MEDIAN_MMR);
-        let mut others: Vec<f32> = tiers
+        let mut others: Vec<f32> = others_tiers
             .iter()
             .enumerate()
             .filter(|(other, _)| *other != slot)
@@ -129,7 +145,7 @@ mod tests {
     fn four_divisions_over_the_others_is_not_enough_in_standard() {
         // Gold II (580) over three Silver Is (320): exactly four divisions.
         let flags = smurf_suspicions(
-            &slots(&[300.0, 300.0, 300.0, 300.0]),
+            &slots(&[320.0, 320.0, 320.0, 320.0]),
             &slots(&[320.0, 320.0, 320.0, 580.0]),
             3,
         );
