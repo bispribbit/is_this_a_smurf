@@ -18,6 +18,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Parser;
 use skill_model::coaching::tier_index;
+use skill_model::mechanics::mechanics_above_lobby;
 use skill_model::{SkillModelBundle, smurf_suspicions};
 use skill_model_training::dataset::{Lobby, Partition, read_lobbies};
 use skill_model_training::smurf_references::{
@@ -124,9 +125,16 @@ fn players(
     let mut players = Vec::new();
     for lobby in lobbies {
         let stats = lobby.stat_references();
+        let match_mmr = bundle.match_model.predict_stats(&stats);
+        let mechanics = mechanics_above_lobby(
+            bundle.mechanics.for_players_per_team(players_per_team),
+            &stats,
+            &match_mmr,
+        );
         let flags = smurf_suspicions(
-            &bundle.match_model.predict_stats(&stats),
-            &bundle.plays_like_model.predict_stats(&stats),
+            &match_mmr,
+            &bundle.plays_like_groups.predict_stats(&stats),
+            &mechanics.each_ref().map(Vec::len),
             players_per_team,
         );
         for slot in lobby.labelled_slots() {

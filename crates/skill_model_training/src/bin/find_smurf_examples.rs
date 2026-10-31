@@ -20,6 +20,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Parser;
 use skill_model::coaching::tier_index;
+use skill_model::mechanics::mechanics_above_lobby;
 use skill_model::{SkillModelBundle, SmurfReason, smurf_suspicions};
 use skill_model_training::dataset::{Lobby, Partition, read_lobbies};
 use skill_model_training::evaluation::PROXY_POSITIVE_MARGIN_MMR;
@@ -100,8 +101,19 @@ fn flagged_players(
 ) -> Vec<FlaggedPlayer> {
     let stats = lobby.stat_references();
     let match_mmr = bundle.match_model.predict_stats(&stats);
-    let plays_like_mmr = bundle.plays_like_model.predict_stats(&stats);
-    let flags = smurf_suspicions(&match_mmr, &plays_like_mmr, players_per_team);
+    let plays_like = bundle.plays_like_groups.predict_stats(&stats);
+    let plays_like_mmr = plays_like.combined_mmr();
+    let mechanics = mechanics_above_lobby(
+        bundle.mechanics.for_players_per_team(players_per_team),
+        &stats,
+        &match_mmr,
+    );
+    let flags = smurf_suspicions(
+        &match_mmr,
+        &plays_like,
+        &mechanics.each_ref().map(Vec::len),
+        players_per_team,
+    );
     let lowest_tier = plays_like_mmr
         .iter()
         .flatten()
@@ -166,16 +178,20 @@ fn main() -> Result<()> {
         .iter()
         .map(|lobby| lobby.stats.iter().flatten().count())
         .sum();
-    let plays_above = flagged
-        .iter()
-        .filter(|player| player.reason == SmurfReason::PlaysAboveLobby)
-        .count();
+    let with_reason = |reason: SmurfReason| {
+        flagged
+            .iter()
+            .filter(|player| player.reason == reason)
+            .count()
+    };
     let confirmed = flagged.iter().filter(|player| player.confirmed()).count();
     println!(
-        "{} evaluation replays, {players} players: {} flagged ({plays_above} play above the lobby, {} ranked above it), {confirmed} confirmed by labels",
+        "{} evaluation replays, {players} players: {} flagged ({} ranked above the lobby, {} play above it, {} mechanics above it), {confirmed} confirmed by labels",
         lobbies.len(),
         flagged.len(),
-        flagged.len() - plays_above,
+        with_reason(SmurfReason::RankedAboveLobby),
+        with_reason(SmurfReason::PlaysAboveLobby),
+        with_reason(SmurfReason::MechanicsAboveLobby),
     );
 
     flagged.sort_by(|left, right| {
@@ -192,6 +208,7 @@ fn main() -> Result<()> {
             match player.reason {
                 SmurfReason::RankedAboveLobby => "ranked",
                 SmurfReason::PlaysAboveLobby => "plays",
+                SmurfReason::MechanicsAboveLobby => "mechanics",
             },
             tier_name(player.match_mmr),
             tier_name(player.plays_like_mmr),

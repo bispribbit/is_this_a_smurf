@@ -27,6 +27,9 @@ const fn smurf_badge_text(reason: skill_model::SmurfReason) -> &'static str {
     match reason {
         skill_model::SmurfReason::RankedAboveLobby => "Predicted rank is much higher than lobby",
         skill_model::SmurfReason::PlaysAboveLobby => "Plays several ranks above this lobby",
+        skill_model::SmurfReason::MechanicsAboveLobby => {
+            "Does several mechanics far above this lobby's rank"
+        }
     }
 }
 
@@ -252,6 +255,11 @@ fn TeamSummaryCard(
                                 if let Some(plays_like) = &player.plays_like {
                                     p { class: "text-sm font-semibold text-red-400",
                                         "Plays like {plays_like}"
+                                    }
+                                }
+                                if let Some(mechanics) = &player.mechanics {
+                                    p { class: "text-xs font-medium text-amber-300 leading-snug",
+                                        "{mechanics}"
                                     }
                                 }
                                 if let Some(roast) = &player.next_rank_roast {

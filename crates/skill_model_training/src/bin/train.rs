@@ -28,9 +28,11 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use feature_extractor::MATCH_STAT_COUNT;
 use skill_model::coaching::{COACHING_TIPS, CoachingTable, CoachingTables, tier_index};
+use skill_model::mechanics::{MECHANIC_HIGH_QUANTILE, MechanicTables, mechanics_above_lobby};
 use skill_model::{
-    PlaysLikeModel, SMURF_MARGIN_OVER_LOBBY_MEDIAN_MMR, SkillModelBundle, SmurfReason,
-    TabularLayout, TabularSkillModel, smurf_suspicions,
+    PlaysLikeGroup, PlaysLikeGroups, PlaysLikeModel, SMURF_MARGIN_OVER_LOBBY_MEDIAN_MMR,
+    STAT_GROUPS, SkillModelBundle, SmurfReason, TabularLayout, TabularSkillModel,
+    plays_like_margins, smurf_margin_over_others_tiers, smurf_suspicions,
 };
 use skill_model_training::coaching_table::build_coaching_tables;
 use skill_model_training::dataset::{
@@ -43,8 +45,9 @@ use skill_model_training::evaluation::{
 use skill_model_training::gradient_boosting::GradientBoostingConfig;
 use skill_model_training::label_cleaning::{
     CLEAN_MARGIN_MMR, CleanedLabels, MATCH_MODEL_CLEANING_ROUNDS, PLAYS_LIKE_CLEANING_ROUNDS,
-    clean_labels_in_rounds, train_plays_like_model,
+    clean_labels_in_rounds, early_stopping_rmse, train_plays_like_model,
 };
+use skill_model_training::mechanic_table::build_mechanic_tables;
 use uuid::Uuid;
 
 #[derive(Parser, Debug)]
@@ -164,12 +167,15 @@ fn print_playlist_metrics(lobbies: &[Lobby], model: &skill_model::TabularSkillMo
 fn print_smurf_report(
     lobbies: &[Lobby],
     match_model: &TabularSkillModel,
-    plays_like_model: &PlaysLikeModel,
+    plays_like_groups: &PlaysLikeGroups,
+    mechanic_tables: &MechanicTables,
 ) {
     for playlist in &PLAYLISTS {
+        let mut margins: Vec<f32> = Vec::new();
         let mut players = 0usize;
         let mut ranked_above = 0usize;
         let mut plays_above = 0usize;
+        let mut mechanics_above = 0usize;
         let mut positives = 0usize;
         let mut flagged_positives = 0usize;
         for lobby in lobbies.iter().filter(|lobby| {
@@ -177,9 +183,18 @@ fn print_smurf_report(
                 && lobby.players_per_team() == Some(playlist.players_per_team)
         }) {
             let stats = lobby.stat_references();
+            let match_mmr = match_model.predict_stats(&stats);
+            let plays_like = plays_like_groups.predict_stats(&stats);
+            margins.extend(plays_like_margins(&match_mmr, &plays_like).iter().flatten());
+            let mechanics = mechanics_above_lobby(
+                mechanic_tables.for_players_per_team(playlist.players_per_team),
+                &stats,
+                &match_mmr,
+            );
             let flags = smurf_suspicions(
-                &match_model.predict_stats(&stats),
-                &plays_like_model.predict_stats(&stats),
+                &match_mmr,
+                &plays_like,
+                &mechanics.each_ref().map(Vec::len),
                 playlist.players_per_team,
             );
             let mut labels: Vec<f32> = lobby
@@ -203,6 +218,7 @@ fn print_smurf_report(
                 match flag {
                     Some(SmurfReason::RankedAboveLobby) => ranked_above += 1,
                     Some(SmurfReason::PlaysAboveLobby) => plays_above += 1,
+                    Some(SmurfReason::MechanicsAboveLobby) => mechanics_above += 1,
                     None => {}
                 }
                 let positive = lobby.targets[slot] > 0.0
@@ -217,11 +233,30 @@ fn print_smurf_report(
             continue;
         }
         println!(
-            "  {:<9} flags {:.2}% of players ({:.2}% ranked above the lobby, {:.2}% play above it)  party positives caught {flagged_positives}/{positives}",
+            "  {:<9} flags {:.2}% of players ({:.2}% ranked above the lobby, {:.2}% play above it, {:.2}% mechanics above it)  party positives caught {flagged_positives}/{positives}",
             playlist.name,
-            100.0 * (ranked_above + plays_above) as f64 / players as f64,
+            100.0 * (ranked_above + plays_above + mechanics_above) as f64 / players as f64,
             100.0 * ranked_above as f64 / players as f64,
             100.0 * plays_above as f64 / players as f64,
+            100.0 * mechanics_above as f64 / players as f64,
+        );
+        let rates: Vec<String> = [2.0, 2.5, 3.0, 3.5, 4.0, 4.5]
+            .iter()
+            .map(|threshold| {
+                let above = margins
+                    .iter()
+                    .filter(|margin| **margin > *threshold)
+                    .count();
+                format!(
+                    "+{threshold:.1}: {:.1}%",
+                    100.0 * above as f64 / margins.len().max(1) as f64
+                )
+            })
+            .collect();
+        println!(
+            "            plays-above rate by weighted margin (shipped +{:.1}): {}",
+            smurf_margin_over_others_tiers(playlist.players_per_team),
+            rates.join("  ")
         );
     }
 }
@@ -454,12 +489,23 @@ fn main() -> Result<()> {
         CLEAN_MARGIN_MMR,
     )
     .lobbies;
-    let plays_like_model = train_plays_like_model(
-        &plays_like_lobbies,
-        &PlaysLikeModel::opponent_independent_layout(),
-        &config,
-    );
-    print_smurf_report(&match_lobbies, &match_model, &plays_like_model);
+    let mut plays_like_groups = PlaysLikeGroups::default();
+    for group in &STAT_GROUPS {
+        let model = train_plays_like_model(&plays_like_lobbies, &group.layout(), &config);
+        let rmse = early_stopping_rmse(&plays_like_lobbies, &model);
+        println!(
+            "  {:<16} {} stats  early-stopping rmse={rmse:.0}",
+            group.name,
+            group.stats.len()
+        );
+        plays_like_groups.groups.push(PlaysLikeGroup {
+            name: group.name.to_owned(),
+            weight: (1.0 / (rmse * rmse)) as f32,
+            model,
+        });
+    }
+    let mechanics = build_mechanic_tables(&match_lobbies, MECHANIC_HIGH_QUANTILE);
+    print_smurf_report(&match_lobbies, &match_model, &plays_like_groups, &mechanics);
 
     println!(
         "== window model ({}, {} s windows)",
@@ -484,10 +530,11 @@ fn main() -> Result<()> {
     let bundle = SkillModelBundle {
         match_model,
         window_model,
-        plays_like_model,
+        plays_like_groups,
         window_seconds: args.window_seconds,
         timeline_emphasis,
         coaching,
+        mechanics,
     };
     println!("  advice picked on the evaluation split, by predicted rank:");
     print_coaching_report(&match_lobbies, &bundle);
@@ -510,8 +557,14 @@ fn main() -> Result<()> {
         .filter(|lobby| lobby.partition == Partition::Evaluation)
         .flat_map(|lobby| {
             let stats = lobby.stat_references();
-            let before = bundle.plays_like_model.predict_stats(&stats);
-            let after = reloaded.plays_like_model.predict_stats(&stats);
+            let before = bundle
+                .plays_like_groups
+                .predict_stats(&stats)
+                .combined_mmr();
+            let after = reloaded
+                .plays_like_groups
+                .predict_stats(&stats)
+                .combined_mmr();
             before
                 .into_iter()
                 .zip(after)

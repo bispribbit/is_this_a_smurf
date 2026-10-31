@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 use std::ops::Range;
 
-use replay_structs::{ParsedReplay, Quaternion, Vector3};
+use replay_structs::{BallState, ParsedReplay, Quaternion, Vector3};
 
 use crate::{PlayerRoster, SLOTS_PER_TEAM, TOTAL_SLOTS, build_goal_replay_excluded_set};
 
@@ -162,12 +162,16 @@ const TURNED_AROUND_DOT: f32 = -0.7;
 const WAVEDASH_MINIMUM_AIRBORNE_SECONDS: f32 = 0.3;
 /// Car-to-ball distance at which an airborne car can put its wheels on the ball.
 const FLIP_RESET_BALL_DISTANCE: f32 = 200.0;
-/// The ball sits on the car's roof: its height over the car, its horizontal offset, and
-/// how high the car itself may be.
-const DRIBBLE_MINIMUM_RELATIVE_HEIGHT: f32 = 90.0;
-const DRIBBLE_MAXIMUM_RELATIVE_HEIGHT: f32 = 220.0;
-const DRIBBLE_MAXIMUM_HORIZONTAL_DISTANCE: f32 = 120.0;
+/// The ball rides on the car: its height over the car, its horizontal offset (the hood
+/// counts), how high the car itself may be, and how closely the ball's horizontal velocity
+/// must follow a car that is actually moving. Measured on high-rank replays, where carried
+/// balls sit 50 to 200 over the car and up to ~200 off its centre.
+const DRIBBLE_MINIMUM_RELATIVE_HEIGHT: f32 = 50.0;
+const DRIBBLE_MAXIMUM_RELATIVE_HEIGHT: f32 = 200.0;
+const DRIBBLE_MAXIMUM_HORIZONTAL_DISTANCE: f32 = 180.0;
 const DRIBBLE_MAXIMUM_CAR_HEIGHT: f32 = 150.0;
+const DRIBBLE_MAXIMUM_SPEED_DIFFERENCE: f32 = 300.0;
+const DRIBBLE_MINIMUM_CAR_SPEED: f32 = 300.0;
 /// Carry time before a dodge counts as a flick.
 const FLICK_MINIMUM_CARRY_SECONDS: f32 = 0.4;
 /// Two aerial touches by the same player this close together are an air dribble.
@@ -629,7 +633,7 @@ pub fn compute_player_window_stats(
                 accumulator,
                 prior,
                 state,
-                &ball.position,
+                ball,
                 CarContact { grounded, on_wall },
                 seconds_since_jump,
                 seconds as f32,
@@ -994,7 +998,7 @@ fn accumulate_multi_frame_mechanics(
     accumulator: &mut Accumulator,
     prior: &PreviousCarState,
     state: &replay_structs::ActorState,
-    ball: &Vector3,
+    ball: &BallState,
     contact: CarContact,
     seconds_since_jump: f32,
     seconds: f32,
@@ -1027,7 +1031,7 @@ fn accumulate_multi_frame_mechanics(
     };
     let near_ball_since_surface = !on_surface
         && (previous.near_ball_since_surface
-            || distance(&state.position, ball) < FLIP_RESET_BALL_DISTANCE);
+            || distance(&state.position, &ball.position) < FLIP_RESET_BALL_DISTANCE);
     if (dodge_started || double_jump_started) && !on_surface {
         flips_since_surface += 1;
         if flips_since_surface >= 2 && near_ball_since_surface && height > HIGH_AIR_HEIGHT {
@@ -1094,12 +1098,15 @@ fn accumulate_multi_frame_mechanics(
     }
 
     // Dribbles and flicks: the ball on the car's roof, then a dodge.
-    let relative_height = ball.z - height;
+    let relative_height = ball.position.z - height;
     let carrying = height < DRIBBLE_MAXIMUM_CAR_HEIGHT
         && (DRIBBLE_MINIMUM_RELATIVE_HEIGHT..=DRIBBLE_MAXIMUM_RELATIVE_HEIGHT)
             .contains(&relative_height)
-        && (ball.x - state.position.x).hypot(ball.y - state.position.y)
-            < DRIBBLE_MAXIMUM_HORIZONTAL_DISTANCE;
+        && (ball.position.x - state.position.x).hypot(ball.position.y - state.position.y)
+            < DRIBBLE_MAXIMUM_HORIZONTAL_DISTANCE
+        && state.velocity.x.hypot(state.velocity.y) > DRIBBLE_MINIMUM_CAR_SPEED
+        && (ball.velocity.x - state.velocity.x).hypot(ball.velocity.y - state.velocity.y)
+            < DRIBBLE_MAXIMUM_SPEED_DIFFERENCE;
     let carrying_seconds = if carrying {
         accumulator.dribble += f64::from(seconds);
         previous.carrying_seconds + seconds

@@ -129,6 +129,18 @@ mod tests {
                     Some(skill_model::SmurfReason::RankedAboveLobby) => {
                         "SMURF (ranked)".to_string()
                     }
+                    Some(skill_model::SmurfReason::MechanicsAboveLobby) => format!(
+                        "SMURF (mechanics: {})",
+                        analysis
+                            .mechanics
+                            .get(slot)
+                            .map(|evidence| evidence
+                                .iter()
+                                .map(|item| item.mechanic.label)
+                                .collect::<Vec<_>>()
+                                .join(", "))
+                            .unwrap_or_default()
+                    ),
                     Some(skill_model::SmurfReason::PlaysAboveLobby) => format!(
                         "SMURF (plays like {:.0})",
                         analysis

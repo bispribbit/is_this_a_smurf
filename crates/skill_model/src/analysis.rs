@@ -18,13 +18,14 @@
 use std::ops::Range;
 
 use feature_extractor::{
-    PlayerMatchStats, PlayerRoster, SLOTS_PER_TEAM, TOTAL_SLOTS, compute_player_match_stats,
-    compute_player_window_stats, time_windows,
+    MATCH_STAT_COUNT, PlayerMatchStats, PlayerRoster, SLOTS_PER_TEAM, TOTAL_SLOTS,
+    compute_player_match_stats, compute_player_window_stats, time_windows,
 };
 use replay_structs::{ParsedReplay, Team};
 
 use crate::SkillModelBundle;
 use crate::coaching::CoachingAdvice;
+use crate::mechanics::{MechanicEvidence, mechanics_above_lobby};
 use crate::smurf::{SmurfReason, smurf_suspicions};
 
 /// Players with less live time than this in a window get no timeline score there. Same
@@ -53,10 +54,13 @@ pub struct MatchAnalysis {
     pub names: [String; TOTAL_SLOTS],
     /// Whole-match MMR per slot.
     pub match_mmr: [Option<f32>; TOTAL_SLOTS],
-    /// MMR each player's own stats play like, per slot.
+    /// MMR each player's own stats play like, per slot (the stat groups' weighted mean).
     pub plays_like_mmr: [Option<f32>; TOTAL_SLOTS],
     /// Why each slot is flagged as a smurf, if it is.
     pub smurf: [Option<SmurfReason>; TOTAL_SLOTS],
+    /// Per slot: the named mechanics done far more than the other players' tier, highest
+    /// typical tier first.
+    pub mechanics: [Vec<MechanicEvidence>; TOTAL_SLOTS],
     /// Roast per slot.
     pub coaching: [Option<CoachingAdvice>; TOTAL_SLOTS],
     /// Timeline windows in order.
@@ -96,12 +100,23 @@ impl SkillModelBundle {
             }
         }
         let match_mmr = self.match_model.predict(&match_stats);
-        let plays_like_mmr = self.plays_like_model.predict(&match_stats);
+        let plays_like = self.plays_like_groups.predict(&match_stats);
+        let plays_like_mmr = plays_like.combined_mmr();
+        let stat_values: [Option<&[f32; MATCH_STAT_COUNT]>; TOTAL_SLOTS] =
+            core::array::from_fn(|slot| match_stats[slot].as_ref().map(|stats| &stats.values));
+        let mechanics = mechanics_above_lobby(
+            self.mechanics
+                .for_players_per_team(parsed.match_format.players_per_team),
+            &stat_values,
+            &match_mmr,
+        );
         let smurf = smurf_suspicions(
             &match_mmr,
-            &plays_like_mmr,
+            &plays_like,
+            &mechanics.each_ref().map(Vec::len),
             parsed.match_format.players_per_team,
         );
+
         let coaching_table = self
             .coaching
             .for_players_per_team(parsed.match_format.players_per_team);
@@ -115,6 +130,7 @@ impl SkillModelBundle {
             match_mmr,
             plays_like_mmr,
             smurf,
+            mechanics,
             coaching,
             timeline,
         }

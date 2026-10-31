@@ -18,6 +18,10 @@
 //! 3. **Weighted groups**: the group margins averaged, each weighted by how well its group
 //!    estimates rank (1 / RMSE² on the early-stopping split).
 //!
+//! 4. **Mechanics above the lobby tier**: count the named mechanics a player does more than
+//!    the lobby tier's 90th or 95th percentile ([`skill_model::mechanics`]); flag two to
+//!    five, alone or on top of the weighted groups.
+//!
 //! Every variant flags the same number of players per playlist (the shipped flag's count,
 //! then 1.5× that), so the reference columns compare recall at equal flag rates. Margins are
 //! in divisions over the other players, each scored half by the model and half by the
@@ -31,10 +35,11 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use feature_extractor::{MATCH_STAT_COUNT, MATCH_STAT_NAMES, TOTAL_SLOTS};
+use feature_extractor::{MATCH_STAT_COUNT, TOTAL_SLOTS};
 use skill_model::coaching::tier_index;
+use skill_model::mechanics::MechanicTables;
 use skill_model::{
-    PlaysLikeModel, SkillModelBundle, TabularLayout, TabularSkillModel,
+    PlaysLikeModel, STAT_GROUPS, SkillModelBundle, TabularLayout, TabularSkillModel,
     smurf_margin_over_others_tiers,
 };
 use skill_model_training::dataset::{Lobby, Partition, evaluate, read_lobbies, train_model};
@@ -43,8 +48,10 @@ use skill_model_training::evaluation::{
 };
 use skill_model_training::gradient_boosting::GradientBoostingConfig;
 use skill_model_training::label_cleaning::{
-    CLEAN_MARGIN_MMR, SlotScores, clean_labels_in_rounds, train_plays_like_model,
+    CLEAN_MARGIN_MMR, SlotScores, clean_labels_in_rounds, early_stopping_rmse,
+    train_plays_like_model,
 };
+use skill_model_training::mechanic_table::build_mechanic_tables;
 use skill_model_training::smurf_references::{
     HIGH_RANK_TIER, MECHANIC_STATS, as_tiers, is_dominant_smurf, is_mechanical_smurf, median,
     reference_mechanics,
@@ -61,6 +68,9 @@ struct Args {
     #[arg(long, default_value = "data/skill_model.bin")]
     bundle: PathBuf,
 }
+
+/// High quantiles a mechanic rate must beat, within the lobby's tier.
+const MECHANIC_QUANTILES: [f32; 2] = [0.9, 0.95];
 
 /// One playlist size and its report name.
 struct Playlist {
@@ -80,94 +90,6 @@ const PLAYLISTS: [Playlist; 3] = [
     Playlist {
         players_per_team: 3,
         name: "standard",
-    },
-];
-
-/// A group of opponent-independent stats with its own plays-like model.
-struct StatGroup {
-    name: &'static str,
-    stats: &'static [&'static str],
-}
-
-const STAT_GROUPS: [StatGroup; 4] = [
-    StatGroup {
-        name: "aerial",
-        stats: &[
-            "low_air_fraction",
-            "high_air_fraction",
-            "wall_fraction",
-            "mean_height",
-            "aerial_touch_fraction",
-            "airborne_upright_fraction",
-            "aerial_dodges_per_minute",
-            "air_roll_fraction",
-            "mean_air_angular_speed",
-            "fast_aerial_fraction",
-            "double_jumps_per_minute",
-        ],
-    },
-    StatGroup {
-        name: "ground and flips",
-        stats: &[
-            "ground_fraction",
-            "jumps_per_minute",
-            "jumps_pressed_per_minute",
-            "dodges_per_minute",
-            "wavedash_like_dodges_per_minute",
-            "pitch_positive_dodge_fraction",
-            "pitch_negative_dodge_fraction",
-            "roll_dodge_fraction",
-            "diagonal_dodge_fraction",
-            "fast_dodge_fraction",
-            "powerslide_fraction",
-            "reverse_fraction",
-            "mean_absolute_steer",
-            "mean_ball_speed_after_touch",
-            "mean_touch_speed_gain",
-        ],
-    },
-    StatGroup {
-        name: "speed and boost",
-        stats: &[
-            "mean_speed",
-            "supersonic_fraction",
-            "slow_fraction",
-            "mean_boost",
-            "boost_empty_fraction",
-            "boost_full_fraction",
-            "boost_collected_per_minute",
-            "boost_used_per_minute",
-            "big_pads_per_minute",
-            "small_pads_per_minute",
-            "boost_while_supersonic_fraction",
-            "slow_with_boost_fraction",
-            "supersonic_per_boost",
-            "boosting_fraction",
-        ],
-    },
-    StatGroup {
-        name: "named mechanics",
-        stats: &[
-            "speed_flips_per_minute",
-            "half_flips_per_minute",
-            "wavedashes_per_minute",
-            "flip_resets_per_minute",
-            "ceiling_touches_per_minute",
-            "dribble_fraction",
-            "flicks_per_minute",
-            "air_dribble_touches_per_minute",
-            "double_taps_per_minute",
-            "wall_touch_fraction",
-            "flip_touch_fraction",
-            "power_shots_per_minute",
-            "fifty_fifties_per_minute",
-            "fifty_fifty_win_fraction",
-            "bumps_inflicted_per_minute",
-            "bumps_received_per_minute",
-            "teammate_bumps_per_minute",
-            "demos_inflicted",
-            "demos_received",
-        ],
     },
 ];
 
@@ -267,18 +189,6 @@ fn drop_rule_labels(
     drops
 }
 
-fn group_layout(group: &StatGroup) -> TabularLayout {
-    TabularLayout {
-        stats: group
-            .stats
-            .iter()
-            .chain(&["players_per_team"])
-            .filter_map(|name| MATCH_STAT_NAMES.iter().position(|stat| stat == name))
-            .collect(),
-        ..PlaysLikeModel::own_stats_layout()
-    }
-}
-
 /// Match-model rank metrics per playlist on the evaluation split.
 fn print_playlist_metrics(lobbies: &[Lobby], model: &TabularSkillModel) {
     for playlist in &PLAYLISTS {
@@ -328,23 +238,6 @@ impl ModelTiers {
     }
 }
 
-/// RMSE of a plays-like model against the (cleaned) labels of early-stopping players.
-fn early_stopping_rmse(lobbies: &[Lobby], model: &PlaysLikeModel) -> f64 {
-    let mut squared_errors = Vec::new();
-    for lobby in lobbies
-        .iter()
-        .filter(|lobby| lobby.partition == Partition::EarlyStopping)
-    {
-        let scores = model.predict_stats(&lobby.stat_references());
-        for slot in lobby.labelled_slots() {
-            if let Some(score) = scores[slot] {
-                squared_errors.push(f64::from(score - lobby.targets[slot]).powi(2));
-            }
-        }
-    }
-    (squared_errors.iter().sum::<f64>() / squared_errors.len().max(1) as f64).sqrt()
-}
-
 /// Divisions over the median of the other players, each scored half by `tiers` and half by
 /// the whole-match model.
 fn margin_over_others(tiers: &SlotScores, match_tiers: &SlotScores, slot: usize) -> Option<f32> {
@@ -366,6 +259,8 @@ struct EvaluatedPlayer {
     dominant: bool,
     /// Margin per model, in the order the models were passed.
     margins: Vec<f32>,
+    /// Per mechanic table: mechanics above the lobby tier's high quantile.
+    mechanics_above: Vec<usize>,
 }
 
 fn evaluated_players(
@@ -373,6 +268,7 @@ fn evaluated_players(
     models: &[&ModelTiers],
     match_tiers: &HashMap<Uuid, SlotScores>,
     references: &MechanicReferences,
+    mechanic_tables: &[MechanicTables],
 ) -> Vec<EvaluatedPlayer> {
     let mut players = Vec::new();
     for lobby in lobbies {
@@ -394,15 +290,66 @@ fn evaluated_players(
             let Some(margins) = margins else {
                 continue;
             };
+            let Some(stats) = lobby.stats[slot] else {
+                continue;
+            };
+            let mut others: Vec<f32> = (0..TOTAL_SLOTS)
+                .filter(|&other| other != slot)
+                .filter_map(|other| lobby_match_tiers[other])
+                .collect();
+            let lobby_tier = median(&mut others).round().max(0.0) as usize;
+            let players_per_team = lobby.players_per_team().unwrap_or(3);
             players.push(EvaluatedPlayer {
                 label: lobby.targets[slot],
                 mechanical: is_mechanical_smurf(lobby, slot, references.for_lobby(lobby)),
                 dominant: is_dominant_smurf(lobby, slot),
                 margins,
+                mechanics_above: mechanic_tables
+                    .iter()
+                    .map(|tables| {
+                        tables
+                            .for_players_per_team(players_per_team)
+                            .map_or(0, |table| table.above_tier(&stats, lobby_tier).len())
+                    })
+                    .collect(),
             });
         }
     }
     players
+}
+
+/// One flag rule's row: how many it flags and which references it catches.
+fn print_fixed_rule(players: &[EvaluatedPlayer], name: &str, flagged: &[bool]) {
+    let picked: Vec<&EvaluatedPlayer> = players
+        .iter()
+        .zip(flagged)
+        .filter(|(_, flagged)| **flagged)
+        .map(|(player, _)| player)
+        .collect();
+    let high_rank = picked
+        .iter()
+        .filter(|player| player.label > 0.0 && tier_index(player.label) >= HIGH_RANK_TIER)
+        .count();
+    println!(
+        "      {name:<40} {:>6.1}% {:>7}/{:<4} {:>7}/{:<4} {:>9.0}%",
+        100.0 * picked.len() as f64 / players.len().max(1) as f64,
+        picked.iter().filter(|player| player.mechanical).count(),
+        players.iter().filter(|player| player.mechanical).count(),
+        picked.iter().filter(|player| player.dominant).count(),
+        players.iter().filter(|player| player.dominant).count(),
+        100.0 * high_rank as f64 / picked.len().max(1) as f64,
+    );
+}
+
+/// The `count` highest scores, as flags.
+fn top(scores: &[f32], count: usize) -> Vec<bool> {
+    let mut order: Vec<usize> = (0..scores.len()).collect();
+    order.sort_by(|&left, &right| scores[right].total_cmp(&scores[left]));
+    let mut flagged = vec![false; scores.len()];
+    for index in order.into_iter().take(count) {
+        flagged[index] = true;
+    }
+    flagged
 }
 
 /// A way of ranking players for a flag: higher scores are flagged first.
@@ -489,6 +436,12 @@ fn main() -> Result<()> {
         CLEAN_MARGIN_MMR,
     );
 
+    // Built from labels cleaned once: smurfs are exactly the high tail at low tiers.
+    let mechanic_tables: Vec<MechanicTables> = MECHANIC_QUANTILES
+        .iter()
+        .map(|&quantile| build_mechanic_tables(&cleaned_once.lobbies, quantile))
+        .collect();
+
     let evaluation: Vec<&Lobby> = lobbies
         .iter()
         .filter(|lobby| lobby.partition == Partition::Evaluation)
@@ -527,7 +480,7 @@ fn main() -> Result<()> {
     let mut group_tiers = Vec::new();
     let mut group_weights = Vec::new();
     for group in &STAT_GROUPS {
-        let model = train_plays_like_model(&cleaned_twice.lobbies, &group_layout(group), &config);
+        let model = train_plays_like_model(&cleaned_twice.lobbies, &group.layout(), &config);
         let rmse = early_stopping_rmse(&cleaned_twice.lobbies, &model);
         println!(
             "  {:<16} {} stats  early-stopping rmse={rmse:.0}",
@@ -547,7 +500,13 @@ fn main() -> Result<()> {
             .copied()
             .filter(|lobby| lobby.players_per_team() == Some(playlist.players_per_team))
             .collect();
-        let players = evaluated_players(&playlist_lobbies, &models, &match_tiers, &references);
+        let players = evaluated_players(
+            &playlist_lobbies,
+            &models,
+            &match_tiers,
+            &references,
+            &mechanic_tables,
+        );
         let shipped_margin = smurf_margin_over_others_tiers(playlist.players_per_team);
         let shipped_count = players
             .iter()
@@ -609,6 +568,42 @@ fn main() -> Result<()> {
             print_equal_rate(&players, &rule_selections, flagged_count);
             println!("    stat groups and weighted:");
             print_equal_rate(&players, &group_selections, flagged_count);
+        }
+
+        println!("    mechanics above the lobby tier (lobby = median of the others' match tiers):");
+        println!(
+            "      {:<40} {:>7} {:>12} {:>12} {:>10}",
+            "", "flagged", "mechanical", "dominant", "high-rank"
+        );
+        let weighted_scores = group_selections
+            .iter()
+            .find(|selection| selection.name == "weighted groups")
+            .map(|selection| selection.scores.clone())
+            .unwrap_or_default();
+        let weighted_flags = top(&weighted_scores, shipped_count);
+        print_fixed_rule(&players, "weighted groups (shipped count)", &weighted_flags);
+        for (table_index, quantile) in MECHANIC_QUANTILES.iter().enumerate() {
+            for minimum in 2..=5 {
+                let rule: Vec<bool> = players
+                    .iter()
+                    .map(|player| player.mechanics_above[table_index] >= minimum)
+                    .collect();
+                print_fixed_rule(
+                    &players,
+                    &format!("{minimum}+ above p{:.0}", quantile * 100.0),
+                    &rule,
+                );
+                let union: Vec<bool> = rule
+                    .iter()
+                    .zip(&weighted_flags)
+                    .map(|(rule, weighted)| *rule || *weighted)
+                    .collect();
+                print_fixed_rule(
+                    &players,
+                    &format!("weighted or {minimum}+ above p{:.0}", quantile * 100.0),
+                    &union,
+                );
+            }
         }
     }
     Ok(())

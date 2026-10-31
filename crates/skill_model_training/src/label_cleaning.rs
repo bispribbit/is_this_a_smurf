@@ -86,6 +86,26 @@ pub fn train_plays_like_model(
     }
 }
 
+/// RMSE of a plays-like model against the labels of early-stopping players: how well it
+/// estimates rank, which sets its group's weight in the smurf flag.
+#[must_use]
+pub fn early_stopping_rmse(lobbies: &[Lobby], model: &PlaysLikeModel) -> f64 {
+    let mut squared_errors = Vec::new();
+    for lobby in lobbies
+        .iter()
+        .filter(|lobby| lobby.partition == Partition::EarlyStopping)
+    {
+        let scores = model.predict_stats(&lobby.stat_references());
+        for slot in lobby.labelled_slots() {
+            if let Some(Some(score)) = scores.get(slot) {
+                let target = lobby.targets.get(slot).copied().unwrap_or_default();
+                squared_errors.push(f64::from(score - target).powi(2));
+            }
+        }
+    }
+    (squared_errors.iter().sum::<f64>() / squared_errors.len().max(1) as f64).sqrt()
+}
+
 /// Plays-like predictions for every training and early-stopping replay, each from a model
 /// trained without that replay ([`FOLDS`] folds by replay hash).
 #[must_use]

@@ -5,12 +5,13 @@ and what we learned getting here.
 
 ## What ships
 
-One file, `data/skill_model.bin` (~2.1 MB, see [Bundle format](#bundle-format)), embedded in the app. It holds:
+One file, `data/skill_model.bin` (~2.3 MB, see [Bundle format](#bundle-format)), embedded in the app. It holds:
 
 | Part | Input | Output | Used for |
 |---|---|---|---|
 | **Match model** | each player's whole-match stats | one MMR per player | rank cards, smurf badge, verdict |
-| **Plays-like model** | each player's own driving, boost and mechanics stats | the rank they play like | smurf badge, verdict |
+| **Plays-like models** | each player's own stats, one model per stat group (aerial, ground, speed and boost, named mechanics) | the rank they play like | smurf badge, verdict |
+| **Mechanics table** | per-rank 95th percentiles of 11 named mechanics | the mechanics a player does far above their lobby | smurf badge, card |
 | **Window model** | the same stats over 60 s of live play | one MMR per player per minute | the timeline |
 | **Coaching table** | per-rank medians of 19 actionable stats | one roast per player | the line under each card |
 
@@ -78,39 +79,61 @@ Lines and tips live in code; editing them needs no retraining.
 ### 5. Smurf flag (`crates/skill_model/src/smurf.rs`)
 
 `smurf_suspicions` is the one rule the badge, the verdict and the evaluation tools share. A
-player is flagged when either:
+player is flagged for the first of three reasons that applies:
 
 - **ranked above the lobby**: their match-model prediction is more than 100 MMR over the
   lobby's median (`SMURF_MARGIN_OVER_LOBBY_MEDIAN_MMR`). It finds parties carrying a weaker
   friend in standard, and almost never fires in duels or doubles: the match model learns
   gaps from rank labels, and labels hardly ever differ inside those lobbies;
-- **plays above the others**: the rank they play like is more than five divisions (doubles)
-  or four (duels, standard) over the median of the *other* players, each of them scored
-  half by the rank they play like and half by the match model
-  (`smurf_margin_over_others_tiers`). The card then says "Plays like Champion II". The
-  margins favour recall: a smurf detector and coach would rather flag a strong player than
-  miss a smurf.
+- **plays above the others**: per stat group, the division the player's own stats play
+  like, over the median of the *other* players (each scored half by that group and half by
+  the match model); the four groups' margins are averaged by weight, and the player is
+  flagged above `smurf_margin_over_others_tiers` (3.75 divisions in duels, 5 in doubles,
+  4.25 in standard; doubles teammates share the ball, so its groups spread widest). The card then says "Plays like
+  Champion II", the groups' weighted average;
+- **mechanics above the lobby**: four or more named mechanics (`MINIMUM_MECHANICS_ABOVE_LOBBY`)
+  done more than the 95th percentile of the other players' rank
+  (`crates/skill_model/src/mechanics.rs`). Per rank, not against a fixed "low rank" bar: a
+  Gold smurf in a Diamond lobby counts as much as a Bronze one.
 
-The plays-like model is one ensemble on the player's own values of 46 stats that do not
-depend on the opponents (`OPPONENT_INDEPENDENT_STATS`: speed, boost, pads, jumps, flips,
-aerials, air roll, shot speed, speed flips, half flips, wavedashes, flip resets, ceiling
-touches, ...). Possession, touches, field position, scoreboard,
-kickoffs and the situational positioning stats are left out: a smurf keeps the ball in the
-other half all game, and in a duel those stats are a split with one opponent. It trains on
-labels cleaned twice ([section 6](#6-label-cleaning-cratesskill_model_trainingsrclabel_cleaningrs)).
-The choices, each measured with `smurf_experiment`:
+The margins favour recall: a smurf detector and coach would rather flag a strong player than
+miss a smurf. Flagged players, and anyone doing three or more mechanics far above their
+lobby, get the mechanics named on their card, highest first: "Speed flips like a Champ I ·
+flip resets like a GC I".
 
-- **opponent-independent stats** catch more smurfs at the same flag rate than all stats,
-  including smurfs picked out only by stats the model never sees (scoreline, possession);
+**Stat groups** (`crates/skill_model/src/plays_like.rs`), each with its own plays-like model
+on the player's own values, weighted by 1 / RMSE² on the early-stopping split:
+
+| Group | Stats | Early-stopping RMSE |
+|---|---|---|
+| aerial | air time and height, aerial touches and flips, air roll, fast aerials | 223 |
+| ground and flips | jumps, flips and their direction, wavedash-like flips, powerslide, shot speed | 215 |
+| speed and boost | speed, supersonic, boost level and use, pads | 274 |
+| named mechanics | speed flips to bumps (section 1), demos | 244 |
+
+One model over every stat let a strong group hide a weak one; a smurf stands out in several
+groups at once. At the same flag rate the weighted groups caught more smurfs in every
+playlist (dominant smurfs: duels 16 → 18 of 61, doubles 17 → 25 of 40, standard 14 → 17 of
+46) and put far fewer flags on Diamond-and-up players (duels 14 % → 4 %). Requiring two or
+three groups to agree did worse than the weighted average. The first three groups never see
+the opponents; possession, touches, field position, scoreboard and kickoffs stay out of
+every group, since a smurf skews those for the whole lobby.
+
+**Mechanics above the lobby** on its own flags too many strong players (10 to 37 % of its
+flags land on Diamond-and-up labels), so it only adds to the groups: in duels it catches
+three more of 14 mechanical and four more of 61 dominant smurfs for one more percent of
+players flagged, and barely changes doubles and standard. The per-rank rates come from
+labels cleaned of likely smurfs, who are exactly the high tail at low ranks.
+
+Earlier choices, measured with `smurf_experiment`, still hold:
+
 - **divisions, not MMR**: divisions are several times wider at the top, and with an MMR
   margin a third of the flags landed on Diamond-and-up players;
 - **against the others, not the lobby**: the lobby median includes the player, so in a duel
   it sits half way to the smurf and halved their margin;
 - **the others half by the match model**: one opponent's off game made a normal Diamond
   duelist look five divisions better. The match model reads the whole lobby, so blending it
-  into the others' score halved the duels flags on Diamond-and-up players, which let the
-  duels margin drop from five to four. Doubles keeps five: at four it flags ~8 % of players
-  for two more smurfs.
+  into the others' score halved the duels flags on Diamond-and-up players.
 
 ### 6. Label cleaning (`crates/skill_model_training/src/label_cleaning.rs`)
 
@@ -238,31 +261,31 @@ replays), which no part of training sees. Labels are account ranks at match time
 
 | Metric | Meaning | Duels | Doubles | Standard |
 |---|---|---|---|---|
-| player RMSE | whole-match error per player | 178 | 113 | **102** |
-| lobby RMSE | error of the lobby's average | 177 | 104 | **89** |
-| within_r | correlation of predicted vs true *gaps to the lobby* (0 = no signal) | 0.21 | 0.37 | **0.53** |
-| concordance | share of lobbymate pairs (>25 MMR apart) ordered correctly (0.5 = chance) | 0.61 | 0.71 | **0.66** |
+| player RMSE | whole-match error per player | 174 | 113 | **102** |
+| lobby RMSE | error of the lobby's average | 173 | 105 | **89** |
+| within_r | correlation of predicted vs true *gaps to the lobby* (0 = no signal) | 0.24 | 0.37 | **0.54** |
+| concordance | share of lobbymate pairs (>25 MMR apart) ordered correctly (0.5 = chance) | 0.61 | 0.69 | **0.66** |
 
 Duels and doubles are scored on 400 to 800 players, so their within_r carries ±0.05; over
 three seeds duels within_r is 0.23 ± 0.05 (`compare_stat_sets`).
 
-The smurf flag ([section 5](#5-smurf-flag-cratesskill_modelsrcsmurfrs)) fires on 5.8 % of
-duels players, 6.5 % of doubles and 4.9 % of standard. Labels cannot confirm a real smurf
-(their label is the smurf account's), so it was chosen with `smurf_experiment` against two
-references:
+The smurf flag ([section 5](#5-smurf-flag-cratesskill_modelsrcsmurfrs)) fires on 6.8 % of
+duels players, 7.1 % of doubles and 5.4 % of standard. Labels cannot confirm a real smurf
+(their label is the smurf account's), so it was chosen with `smurf_signals_experiment`
+against two references, at about the shipped flag rate:
 
 | Reference (labelled Gold II or lower) | Duels | Doubles | Standard |
 |---|---|---|---|
-| **mechanical**: Champion I mechanics on most aerial stats, team won by 2+ | 5/14 | 11/16 | 10/14 |
-| **dominant**: team won by 3+, most possession and touches in the lobby | 16/61 | 17/40 | 14/46 |
-| flags on players labelled Diamond or higher | 14 % | 5 % | 8 % |
+| **mechanical**: Champion I mechanics on most aerial stats, team won by 2+ | 12/14 | 14/16 | 11/14 |
+| **dominant**: team won by 3+, most possession and touches in the lobby | 20/61 | 24/40 | 18/46 |
+| flags on players labelled Diamond or higher | 4 % | 5 % | 7 % |
 
-With one cleaning round and no blend, the same margins caught 2/14, 7/16 and 10/14
-mechanical smurfs, 9/61, 13/40 and 11/46 dominant ones, and put 17 %, 8 % and 9 % of the
-flags on Diamond-and-up players.
+A single plays-like model at the same rates caught 5/14, 11/16 and 10/14 mechanical smurfs,
+16/61, 17/40 and 14/46 dominant ones, and put 14 %, 5 % and 8 % of its flags on
+Diamond-and-up players.
 
-The mechanical set favours the plays-like model (it sees those stats); the dominant set is
-built only from stats it never sees. Before the plays-like rule the flag caught none of
+The mechanical set favours the plays-like models and the mechanics reason (they see those
+stats); the dominant set is built only from stats they never see. Before the plays-like rule the flag caught none of
 either in any playlist. Parties (players ranked ≥150 over their lobby) are the ranked-above
 rule's job: it flags 0.4 % of players with ~57 % precision (`train` prints its margin table).
 
@@ -308,16 +331,10 @@ tree model replaced it in October 2026. What is worth remembering:
 - Make the parser's car/component linking deterministic (it iterates `HashMap`s, so repeated
   extractions differ by ~1 % on boost/jump counts).
 - Store Ballchasing platform ids, which would allow real smurf labels from account history.
-- **Ship the weighted stat groups as the smurf flag.** `smurf_signals_experiment` trains one
-  plays-like model per stat group (aerial, ground and flips, speed and boost, named
-  mechanics) and averages their margins, each weighted by 1 / RMSE². At the shipped flag
-  rate it catches more dominant smurfs in every playlist (duels 16 → 18 of 61, doubles
-  17 → 25 of 40, standard 14 → 17 of 46) and puts far fewer flags on Diamond-and-up
-  players (duels 14 % → 4 %). Needs the group models in the bundle and margins re-chosen
-  for the averaged score.
 - Dropping the mechanical reference's labels from training (on top of cleaning) helps the
   flag on the dominant yardstick, but moved duels rank metrics both ways between runs.
-- The dribble detector finds the ball on the roof 0.3 % of the time at every rank, so it
-  (and flicks, built on it) carries no signal yet. Every other named mechanic rises with
-  rank except bumps, which every rank does about as often; teammate bumps fall 5× from
-  Bronze to SSL.
+- Dribbles are still rare in the data (0.1 % of the time in Silver, 0.5 % in SSL, with the
+  ball on the car and moving with it); flicks rise ×10 from Silver to SSL. Every other named
+  mechanic rises with rank except bumps, which every rank does about as often; teammate
+  bumps fall 5× from Bronze to SSL. Half flips barely separate ranks, so that detector is
+  probably too loose.

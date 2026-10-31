@@ -8,6 +8,7 @@
 use feature_extractor::TOTAL_SLOTS;
 use rand::{RngExt, rng};
 use replay_structs::{GameFrame, MatchFormat, ParsedReplay, RankDivision, Team};
+use skill_model::mechanics::{MechanicEvidence, TIER_SINGULARS};
 use skill_model::{MatchAnalysis, PlayerTimeline, SmurfReason};
 
 use crate::app_state::{
@@ -197,6 +198,36 @@ pub(crate) fn format_timeline_boundary_label(seconds: f32) -> String {
 }
 
 /// Cards and verdict input: every player the match model scored, in slot order.
+/// Mechanics a card shows at most.
+const MECHANICS_SHOWN: usize = 3;
+
+/// Mechanics an unflagged player must do far above the lobby before the card names them.
+const MECHANICS_FOR_UNFLAGGED: usize = 3;
+
+/// "Speed flips like a Champ I · flip resets like a GC I", or `None` when there is nothing
+/// worth showing.
+fn mechanics_line(evidence: &[MechanicEvidence], flagged: bool) -> Option<String> {
+    if evidence.is_empty() || (!flagged && evidence.len() < MECHANICS_FOR_UNFLAGGED) {
+        return None;
+    }
+    let parts: Vec<String> = evidence
+        .iter()
+        .take(MECHANICS_SHOWN)
+        .map(|item| {
+            let tier = TIER_SINGULARS
+                .get(item.typical_tier)
+                .copied()
+                .unwrap_or("SSL");
+            format!("{} like a {tier}", item.mechanic.label)
+        })
+        .collect();
+    let line = parts.join(" · ");
+    let mut characters = line.chars();
+    characters
+        .next()
+        .map(|first| first.to_uppercase().chain(characters).collect())
+}
+
 pub(crate) fn build_prediction_results(
     analysis: &MatchAnalysis,
     match_format: MatchFormat,
@@ -218,6 +249,10 @@ pub(crate) fn build_prediction_results(
                 plays_like: analysis.plays_like_mmr[slot]
                     .filter(|_| analysis.smurf[slot] == Some(SmurfReason::PlaysAboveLobby))
                     .map(RankDivision::from),
+                mechanics: mechanics_line(
+                    &analysis.mechanics[slot],
+                    analysis.smurf[slot].is_some(),
+                ),
             })
         })
         .collect();

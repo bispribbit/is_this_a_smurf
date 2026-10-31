@@ -12,17 +12,19 @@
 //!   error of at most half a step: far below 0.1 MMR once the learning rate applies.
 //!
 //! Layout: [`MAGIC`] then brotli(payload). The payload is the header JSON (length-prefixed;
-//! stat names, layouts, scales, coaching table) followed by five ensembles in a fixed order
-//! (match absolute, match within, window absolute, window within, plays like). Integers and floats are
-//! little-endian.
+//! stat names, layouts, scales, coaching and mechanic tables) followed by the ensembles in a
+//! fixed order (match absolute, match within, window absolute, window within, then one per
+//! plays-like group in header order). Integers and floats are little-endian.
 
 use serde::{Deserialize, Serialize};
 
 use crate::coaching::CoachingTables;
+use crate::mechanics::MechanicTables;
 use crate::model::{FrozenEnsemble, FrozenNode, PlaysLikeModel, TabularLayout, TabularSkillModel};
+use crate::plays_like::{PlaysLikeGroup, PlaysLikeGroups};
 
 /// File signature and format version.
-const MAGIC: &[u8; 8] = b"RLSKILL4";
+const MAGIC: &[u8; 8] = b"RLSKILL5";
 
 /// Largest quantised leaf magnitude.
 const LEAF_STEPS: f32 = 32767.0;
@@ -34,8 +36,9 @@ pub struct SkillModelBundle {
     pub match_model: TabularSkillModel,
     /// Scores fixed windows of live play: the timeline.
     pub window_model: TabularSkillModel,
-    /// Scores the rank each player's own stats play like: the smurf flag.
-    pub plays_like_model: PlaysLikeModel,
+    /// Score the rank each player's own stats play like, one model per stat group: the
+    /// smurf flag.
+    pub plays_like_groups: PlaysLikeGroups,
     /// Window length the window model was trained on, in seconds of live play.
     pub window_seconds: f32,
     /// Multiplier applied to a player's window-to-window form on the timeline so a typical
@@ -43,6 +46,8 @@ pub struct SkillModelBundle {
     pub timeline_emphasis: f32,
     /// Per-tier reference stats for the "next rank" roast, per playlist size.
     pub coaching: CoachingTables,
+    /// Per-tier mechanic rates: which mechanics a player does far more than their lobby.
+    pub mechanics: MechanicTables,
 }
 
 /// Why a bundle could not be decoded.
@@ -105,15 +110,24 @@ struct ModelHeader {
     deviation_scale: f32,
 }
 
+/// The non-tree half of a [`PlaysLikeGroup`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PlaysLikeGroupHeader {
+    name: String,
+    weight: f32,
+    layout: TabularLayout,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct BundleHeader {
     stat_names: Vec<String>,
     match_model: ModelHeader,
     window_model: ModelHeader,
-    plays_like_layout: TabularLayout,
+    plays_like_groups: Vec<PlaysLikeGroupHeader>,
     window_seconds: f32,
     timeline_emphasis: f32,
     coaching: CoachingTables,
+    mechanics: MechanicTables,
 }
 
 impl ModelHeader {
@@ -548,10 +562,20 @@ impl SkillModelBundle {
             stat_names: self.match_model.stat_names.clone(),
             match_model: ModelHeader::of(&self.match_model),
             window_model: ModelHeader::of(&self.window_model),
-            plays_like_layout: self.plays_like_model.layout.clone(),
+            plays_like_groups: self
+                .plays_like_groups
+                .groups
+                .iter()
+                .map(|group| PlaysLikeGroupHeader {
+                    name: group.name.clone(),
+                    weight: group.weight,
+                    layout: group.model.layout.clone(),
+                })
+                .collect(),
             window_seconds: self.window_seconds,
             timeline_emphasis: self.timeline_emphasis,
             coaching: self.coaching.clone(),
+            mechanics: self.mechanics.clone(),
         };
         let header_json = serde_json::to_vec(&header)
             .map_err(|error| BundleEncodeError::Header(error.to_string()))?;
@@ -563,8 +587,14 @@ impl SkillModelBundle {
             &self.match_model.within,
             &self.window_model.absolute,
             &self.window_model.within,
-            &self.plays_like_model.ensemble,
-        ] {
+        ]
+        .into_iter()
+        .chain(
+            self.plays_like_groups
+                .groups
+                .iter()
+                .map(|group| &group.model.ensemble),
+        ) {
             write_ensemble(ensemble, &mut payload)?;
         }
 
@@ -601,7 +631,17 @@ impl SkillModelBundle {
         let match_within = reader.ensemble()?;
         let window_absolute = reader.ensemble()?;
         let window_within = reader.ensemble()?;
-        let plays_like = reader.ensemble()?;
+        let mut groups = Vec::with_capacity(header.plays_like_groups.len());
+        for group in header.plays_like_groups {
+            groups.push(PlaysLikeGroup {
+                name: group.name,
+                weight: group.weight,
+                model: PlaysLikeModel {
+                    layout: group.layout,
+                    ensemble: reader.ensemble()?,
+                },
+            });
+        }
         Ok(Self {
             match_model: header.match_model.into_model(
                 header.stat_names.clone(),
@@ -613,13 +653,11 @@ impl SkillModelBundle {
                 window_absolute,
                 window_within,
             ),
-            plays_like_model: PlaysLikeModel {
-                layout: header.plays_like_layout,
-                ensemble: plays_like,
-            },
+            plays_like_groups: PlaysLikeGroups { groups },
             window_seconds: header.window_seconds,
             timeline_emphasis: header.timeline_emphasis,
             coaching: header.coaching,
+            mechanics: header.mechanics,
         })
     }
 }
@@ -680,17 +718,24 @@ mod tests {
         SkillModelBundle {
             match_model: model(900.0),
             window_model: model(800.0),
-            plays_like_model: PlaysLikeModel {
-                layout: model(0.0).absolute_layout,
-                ensemble: FrozenEnsemble {
-                    base_prediction: 700.0,
-                    learning_rate: 0.2,
-                    trees: vec![tree()],
-                },
+            plays_like_groups: PlaysLikeGroups {
+                groups: vec![PlaysLikeGroup {
+                    name: "aerial".into(),
+                    weight: 2.0,
+                    model: PlaysLikeModel {
+                        layout: model(0.0).absolute_layout,
+                        ensemble: FrozenEnsemble {
+                            base_prediction: 700.0,
+                            learning_rate: 0.2,
+                            trees: vec![tree()],
+                        },
+                    },
+                }],
             },
             window_seconds: 60.0,
             timeline_emphasis: 5.0,
             coaching: CoachingTables::default(),
+            mechanics: MechanicTables::default(),
         }
     }
 
@@ -707,8 +752,8 @@ mod tests {
                 ),
                 (&original.window_model.within, &decoded.window_model.within),
                 (
-                    &original.plays_like_model.ensemble,
-                    &decoded.plays_like_model.ensemble,
+                    &original.plays_like_groups.groups[0].model.ensemble,
+                    &decoded.plays_like_groups.groups[0].model.ensemble,
                 ),
             ] {
                 let difference = (before.predict(&row) - after.predict(&row)).abs();
