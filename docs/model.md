@@ -215,6 +215,9 @@ cargo run --release -p skill_model_training --bin smurf_experiment
 # Smurf flag from reference-rule label drops, per-stat-group models and their weighted mix
 cargo run --release -p skill_model_training --bin smurf_signals_experiment
 
+# Low-rank players doing each mechanic at a Champion I rate, and whether the flag catches them
+cargo run --release -p skill_model_training --bin mechanic_smurfs
+
 # Whole-match model with and without the named-mechanics stats, over seeds
 cargo run --release -p skill_model_training --bin compare_stat_sets
 
