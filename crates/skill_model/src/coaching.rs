@@ -1,10 +1,11 @@
 //! One roast per player: what the next rank up does that you don't.
 //!
-//! Each player is compared with the **median player [`TARGET_TIER_STEP`] tiers above their
-//! predicted tier** (Bronze I → Silver I, Gold III → Platinum III) on a curated list of
-//! stats that a person can act on. The stat with the largest shortfall, measured in that
-//! tier's own spread, picks the line. Because the reference is always the rank just above,
-//! a bronze is told to hit the ball forward and a champ to fast-aerial — never the reverse.
+//! Each player is compared with the **median player [`TARGET_TIER_STEP`] divisions above
+//! their predicted division** (Diamond I → Diamond III, Champion III → Grand Champion II) on
+//! a curated list of stats that a person can act on. The stat with the largest shortfall,
+//! measured in that division's own spread, picks the line. Because the reference is always
+//! just above, a bronze is told to hit the ball forward and a champ to
+//! fast-aerial — never the reverse.
 //!
 //! Only stats that actually improve from the player's tier to the target tier are eligible
 //! (see [`MINIMUM_PROGRESSION`]); otherwise everyone would be told to do whatever varies
@@ -18,12 +19,21 @@ use serde::{Deserialize, Serialize};
 
 mod lines;
 
-/// How many tiers above the player's predicted tier the comparison targets. Three tiers is
-/// one named rank (Silver I → Gold I).
-pub const TARGET_TIER_STEP: usize = 3;
+/// How many tiers above the player's predicted tier the comparison targets.
+///
+/// Two divisions (Diamond I → Diamond III): from Diamond up a whole named rank is several
+/// hundred MMR, too far to be the next step, while the next division's median is only a few
+/// wins away from a player at the top of their own division.
+pub const TARGET_TIER_STEP: usize = 2;
 
-/// A stat must move by at least this many target-tier spreads between the player's tier
-/// and the target tier to count as something that separates the two.
+/// How many tiers above the player's tier a stat must improve over to count.
+///
+/// One division is too close: neighbouring medians barely move and their differences are
+/// mostly noise.
+pub const PROGRESSION_TIER_STEP: usize = 3;
+
+/// A stat must move by at least this many spreads between the player's tier and
+/// [`PROGRESSION_TIER_STEP`] tiers above to count as something that separates the ranks.
 pub const MINIMUM_PROGRESSION: f32 = 0.15;
 
 /// The player must trail the target tier's median by at least this many spreads.
@@ -81,7 +91,8 @@ const NAME_PLACEHOLDER: &str = "{name}";
 
 /// One coachable stat and its lines.
 ///
-/// Lines use `{name}`, `{yours}`, `{theirs}` and `{next}` (plural rank name, e.g. "Golds").
+/// Lines use `{name}`, `{yours}`, `{theirs}` and `{next}` (plural division name, e.g.
+/// "Gold IIs").
 #[derive(Debug, Clone, Copy)]
 pub struct CoachingTip {
     /// Stat name in [`MATCH_STAT_NAMES`].
@@ -253,28 +264,28 @@ impl CoachingTables {
 }
 
 /// Plural display name per tier index (0 = Bronze I … 21 = SSL), as used in `{next}`.
-const TIER_GROUP_PLURALS: [&str; 22] = [
-    "Bronzes",
-    "Bronzes",
-    "Bronzes",
-    "Silvers",
-    "Silvers",
-    "Silvers",
-    "Golds",
-    "Golds",
-    "Golds",
-    "Platinums",
-    "Platinums",
-    "Platinums",
-    "Diamonds",
-    "Diamonds",
-    "Diamonds",
-    "Champs",
-    "Champs",
-    "Champs",
-    "GCs",
-    "GCs",
-    "GCs",
+const TIER_PLURALS: [&str; 22] = [
+    "Bronze Is",
+    "Bronze IIs",
+    "Bronze IIIs",
+    "Silver Is",
+    "Silver IIs",
+    "Silver IIIs",
+    "Gold Is",
+    "Gold IIs",
+    "Gold IIIs",
+    "Platinum Is",
+    "Platinum IIs",
+    "Platinum IIIs",
+    "Diamond Is",
+    "Diamond IIs",
+    "Diamond IIIs",
+    "Champ Is",
+    "Champ IIs",
+    "Champ IIIs",
+    "GC Is",
+    "GC IIs",
+    "GC IIIs",
     "SSLs",
 ];
 
@@ -296,7 +307,7 @@ pub struct CoachingAdvice {
     pub yours: f32,
     /// The target tier's median.
     pub theirs: f32,
-    /// Plural name of the target tier's rank.
+    /// Plural name of the target division.
     pub next: &'static str,
     /// Shortfall in target-tier spreads (0 when there is nothing to fix).
     pub shortfall: f32,
@@ -334,7 +345,7 @@ impl CoachingTable {
         let last = self.tiers.len().checked_sub(1)?;
         let current = tier_index(predicted_mmr).min(last);
         let target = (current + TARGET_TIER_STEP).min(last);
-        let next = TIER_GROUP_PLURALS.get(target).copied().unwrap_or("SSLs");
+        let next = TIER_PLURALS.get(target).copied().unwrap_or("SSLs");
         let nothing = CoachingAdvice {
             tip: None,
             yours: 0.0,
@@ -347,6 +358,9 @@ impl CoachingTable {
         }
         let current_reference = self.tiers.get(current)?;
         let target_reference = self.tiers.get(target)?;
+        let progression_reference = self
+            .tiers
+            .get((current + PROGRESSION_TIER_STEP).min(last))?;
 
         let mut best = nothing;
         for (tip_index, tip) in COACHING_TIPS.iter().enumerate() {
@@ -369,14 +383,20 @@ impl CoachingTable {
             let Some(&current_median) = current_reference.medians.get(tip_index) else {
                 continue;
             };
-            if spread <= f32::EPSILON {
+            let Some(&progression_median) = progression_reference.medians.get(tip_index) else {
+                continue;
+            };
+            let Some(&progression_spread) = progression_reference.spreads.get(tip_index) else {
+                continue;
+            };
+            if spread <= f32::EPSILON || progression_spread <= f32::EPSILON {
                 continue;
             }
             let sign = match tip.better {
                 Better::Higher => 1.0,
                 Better::Lower => -1.0,
             };
-            let progression = sign * (theirs - current_median) / spread;
+            let progression = sign * (progression_median - current_median) / progression_spread;
             let shortfall = sign * (theirs - yours) / spread;
             let visible = (theirs - yours).abs() >= tip.unit.minimum_gap()
                 && tip.unit.format(theirs) != tip.unit.format(yours);
@@ -503,8 +523,8 @@ mod tests {
         stats[stat_column("high_air_fraction")] = 0.0;
         let bronze = table().advise(100.0, &stats).expect("table is not empty");
         assert_eq!(bronze.tip.map(|tip| tip.stat), Some("touches_per_minute"));
-        assert_eq!(bronze.next, "Silvers");
-        assert!(bronze.line(0, "Player").contains("Silvers"));
+        assert_eq!(bronze.next, "Bronze IIIs");
+        assert!(bronze.line(0, "Player").contains("Bronze IIIs"));
     }
 
     #[test]

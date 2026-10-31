@@ -60,11 +60,15 @@ not a second rank estimate; the cards always come from the match model.
 
 ### 4. Roast (`crates/skill_model/src/coaching.rs`)
 
-Each player is compared with the **median player three tiers above their predicted tier**
-(Bronze I → Silver I, Gold III → Platinum III). The roast picks the stat where they fall
-furthest short, measured in that tier's own spread, among stats that (a) actually improve from
-their tier to the target tier, and (b) show a gap a reader would notice ("0 % vs 1 %" never
-qualifies). A tip is disabled automatically if the data says its "better" direction is wrong.
+Each player is compared with the **median player two divisions up** (Diamond I → Diamond III,
+Champion III → Grand Champion II): from Diamond up a whole named rank is several hundred MMR,
+too far to be the next step, while the next division's median is only a few wins away from a
+player at the top of their own division. The roast picks the stat where they fall furthest
+short of that division, measured in its own spread, among stats that (a) actually improve
+from their tier to three tiers above (neighbouring divisions differ too little to tell what
+separates ranks from noise; judged on one division, a third to half of players got no tip),
+and (b) show a gap a reader would notice ("0 % vs 1 %" never qualifies). A tip is disabled
+automatically if the data says its "better" direction is wrong.
 Lines and tips live in code; editing them needs no retraining.
 
 ## Playlists

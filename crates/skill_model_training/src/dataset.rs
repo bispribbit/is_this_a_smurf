@@ -15,7 +15,8 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use feature_extractor::{MATCH_STAT_COUNT, MATCH_STAT_NAMES, PLAYERS_PER_TEAM_STAT, TOTAL_SLOTS};
 use skill_model::{
-    LobbySummary, MINIMUM_MATCH_SECONDS, MINIMUM_WINDOW_SECONDS, TabularLayout, TabularSkillModel,
+    FrozenEnsemble, LobbySummary, MINIMUM_MATCH_SECONDS, MINIMUM_WINDOW_SECONDS, TabularLayout,
+    TabularSkillModel,
 };
 use uuid::Uuid;
 
@@ -239,6 +240,16 @@ fn fit(
         }),
         config,
     )
+}
+
+/// Trains one ensemble predicting each player's label from `layout`'s features.
+#[must_use]
+pub fn train_absolute_ensemble(
+    lobbies: &[Lobby],
+    layout: &TabularLayout,
+    config: &GradientBoostingConfig,
+) -> FrozenEnsemble {
+    fit(lobbies, layout, false, config).freeze()
 }
 
 /// OLS slope of true on predicted within-lobby deviation over the early-stopping lobbies,

@@ -3,8 +3,8 @@
 //!
 //! Lines are written about the player, never to the reader: the person who uploaded the
 //! replay is only one of the six cars. Placeholders: `{name}` (gamertag), `{yours}` (the
-//! player's value), `{theirs}` (the target tier's median) and `{next}` (plural rank name,
-//! e.g. "Golds").
+//! player's value), `{theirs}` (the target tier's median) and `{next}` (plural division
+//! name, e.g. "Gold IIs").
 
 pub(super) const TOUCHES_PER_MINUTE: &[&str] = &[
     "The ball isn't lava. {next} touch it {theirs}, {name} managed {yours}.",
