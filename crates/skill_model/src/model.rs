@@ -289,6 +289,57 @@ impl TabularSkillModel {
     }
 }
 
+/// Stats that describe how a player drives, manages boost and handles the car, whoever
+/// they play against.
+///
+/// Left out: anything the opponents shape. Possession, touches, field position, distances,
+/// scoreboard, kickoffs, demos and the situational positioning stats all look different
+/// when a smurf has the ball in the other half all game: in a duel they are a split with
+/// one opponent. `players_per_team` stays so the trees know the playlist.
+pub const OPPONENT_INDEPENDENT_STATS: &[&str] = &[
+    "mean_speed",
+    "supersonic_fraction",
+    "slow_fraction",
+    "ground_fraction",
+    "low_air_fraction",
+    "high_air_fraction",
+    "wall_fraction",
+    "mean_height",
+    "jumps_per_minute",
+    "mean_boost",
+    "boost_empty_fraction",
+    "boost_full_fraction",
+    "boost_collected_per_minute",
+    "boost_used_per_minute",
+    "big_pads_per_minute",
+    "small_pads_per_minute",
+    "boost_while_supersonic_fraction",
+    "mean_ball_speed_after_touch",
+    "aerial_touch_fraction",
+    "mean_touch_speed_gain",
+    "airborne_upright_fraction",
+    "slow_with_boost_fraction",
+    "supersonic_per_boost",
+    "jumps_pressed_per_minute",
+    "double_jumps_per_minute",
+    "dodges_per_minute",
+    "wavedash_like_dodges_per_minute",
+    "aerial_dodges_per_minute",
+    "pitch_positive_dodge_fraction",
+    "pitch_negative_dodge_fraction",
+    "roll_dodge_fraction",
+    "diagonal_dodge_fraction",
+    "fast_dodge_fraction",
+    "boosting_fraction",
+    "powerslide_fraction",
+    "air_roll_fraction",
+    "reverse_fraction",
+    "mean_absolute_steer",
+    "mean_air_angular_speed",
+    "fast_aerial_fraction",
+    "players_per_team",
+];
+
 /// Predicts each player's MMR from their own stats only: the rank they *play like*,
 /// whatever lobby they are in.
 ///
@@ -314,6 +365,22 @@ impl PlaysLikeModel {
             lobby_mean: false,
             team_context: false,
             stats: (0..MATCH_STAT_COUNT).collect(),
+        }
+    }
+
+    /// Own values of [`OPPONENT_INDEPENDENT_STATS`] only.
+    #[must_use]
+    pub fn opponent_independent_layout() -> TabularLayout {
+        TabularLayout {
+            stats: OPPONENT_INDEPENDENT_STATS
+                .iter()
+                .filter_map(|name| {
+                    feature_extractor::MATCH_STAT_NAMES
+                        .iter()
+                        .position(|stat| stat == name)
+                })
+                .collect(),
+            ..Self::own_stats_layout()
         }
     }
 

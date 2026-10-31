@@ -179,6 +179,7 @@ fn print_smurf_report(
             let flags = smurf_suspicions(
                 &match_model.predict_stats(&stats),
                 &plays_like_model.predict_stats(&stats),
+                playlist.players_per_team,
             );
             let mut labels: Vec<f32> = lobby
                 .labelled_slots()
@@ -399,7 +400,13 @@ fn main() -> Result<()> {
         "== label cleaning (labels ≥ {CLEAN_MARGIN_MMR} MMR below an out-of-fold plays-like prediction)"
     );
     let raw_match_lobbies = read_lobbies(&args.match_stats)?;
-    let out_of_fold = out_of_fold_plays_like(&raw_match_lobbies, &config);
+    // Cleaning uses every stat (the better rank estimate); the shipped plays-like model
+    // sees only opponent-independent stats (the better smurf flag). See docs/model.md.
+    let out_of_fold = out_of_fold_plays_like(
+        &raw_match_lobbies,
+        &PlaysLikeModel::own_stats_layout(),
+        &config,
+    );
     let CleanedLabels {
         lobbies: match_lobbies,
         dropped,
@@ -433,7 +440,11 @@ fn main() -> Result<()> {
     }
 
     println!("== plays-like model and smurf flag (evaluation split)");
-    let plays_like_model = train_plays_like_model(&match_lobbies, &config);
+    let plays_like_model = train_plays_like_model(
+        &match_lobbies,
+        &PlaysLikeModel::opponent_independent_layout(),
+        &config,
+    );
     print_smurf_report(&match_lobbies, &match_model, &plays_like_model);
 
     println!(

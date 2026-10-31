@@ -15,8 +15,8 @@
 use std::collections::{HashMap, HashSet};
 
 use feature_extractor::TOTAL_SLOTS;
-use skill_model::PlaysLikeModel;
 use skill_model::coaching::tier_index;
+use skill_model::{PlaysLikeModel, TabularLayout};
 use uuid::Uuid;
 
 use crate::dataset::{Lobby, Partition, train_absolute_ensemble};
@@ -65,15 +65,17 @@ impl DroppedLabels {
     }
 }
 
-/// Trains the plays-like model on the training partition of `lobbies`.
+/// Trains a plays-like model on `layout`'s columns and the training partition of `lobbies`.
 #[must_use]
 pub fn train_plays_like_model(
     lobbies: &[Lobby],
+    layout: &TabularLayout,
     config: &GradientBoostingConfig,
 ) -> PlaysLikeModel {
-    let layout = PlaysLikeModel::own_stats_layout();
-    let ensemble = train_absolute_ensemble(lobbies, &layout, config);
-    PlaysLikeModel { layout, ensemble }
+    PlaysLikeModel {
+        layout: layout.clone(),
+        ensemble: train_absolute_ensemble(lobbies, layout, config),
+    }
 }
 
 /// Plays-like predictions for every training and early-stopping replay, each from a model
@@ -81,6 +83,7 @@ pub fn train_plays_like_model(
 #[must_use]
 pub fn out_of_fold_plays_like(
     lobbies: &[Lobby],
+    layout: &TabularLayout,
     config: &GradientBoostingConfig,
 ) -> PlaysLikeScores {
     // Independent of the early-stopping split, which uses the hash's low digits.
@@ -93,7 +96,7 @@ pub fn out_of_fold_plays_like(
                 lobby.partition = Partition::Evaluation;
             }
         }
-        let model = train_plays_like_model(&subset, config);
+        let model = train_plays_like_model(&subset, layout, config);
         for lobby in lobbies
             .iter()
             .filter(|lobby| lobby.partition != Partition::Evaluation && fold(lobby) == held_out)

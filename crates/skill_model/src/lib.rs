@@ -22,9 +22,10 @@ mod smurf;
 pub use analysis::{MINIMUM_MATCH_SECONDS, MINIMUM_WINDOW_SECONDS, MatchAnalysis, PlayerTimeline};
 pub use encoding::{BundleDecodeError, BundleEncodeError, SkillModelBundle};
 pub use model::{
-    FrozenEnsemble, FrozenNode, LobbySummary, PlaysLikeModel, TabularLayout, TabularSkillModel,
+    FrozenEnsemble, FrozenNode, LobbySummary, OPPONENT_INDEPENDENT_STATS, PlaysLikeModel,
+    TabularLayout, TabularSkillModel,
 };
 pub use smurf::{
-    SMURF_MARGIN_OVER_LOBBY_MEDIAN_MMR, SMURF_MARGIN_OVER_LOBBY_MEDIAN_TIERS, SmurfReason,
+    SMURF_MARGIN_OVER_LOBBY_MEDIAN_MMR, SmurfReason, smurf_margin_over_others_tiers,
     smurf_suspicions,
 };

@@ -3,24 +3,22 @@
     reason = "slot arrays indexed by slots below TOTAL_SLOTS, stat arrays by stat indices"
 )]
 
-//! Can a "plays like" score from a player's own stats find the smurfs the shipped model
-//! misses?
+//! Which stats should the plays-like model (the smurf flag's own-stats score) see?
 //!
-//! The shipped model predicts a lobby level plus each player's gap to it, and the gap is
-//! learned from rank labels. Duels and doubles labels almost never differ inside a lobby,
-//! and a smurf is labelled with the smurf account's rank, so it learns that no gap exists.
-//! This experiment:
+//! For each variant (every stat, or only [`OPPONENT_INDEPENDENT_STATS`]) this trains the
+//! plays-like model the way `train` does: out-of-fold scores, label cleaning, then a model
+//! on the cleaned labels. It then flags players whose plays-like division is more than N
+//! divisions over the median of the other players, on each playlist's evaluation split,
+//! against:
 //!
-//! 1. Trains an **own-stats** model (each player's own stats only, no lobby features) with
-//!    out-of-fold predictions for every training player.
-//! 2. **Cleans labels**: training players whose own-stats prediction is at least
-//!    `--clean-margin` over their label lose that label, then both models are retrained.
-//! 3. Scores smurf flags (score over the lobby's median score, in MMR or in tiers) from the shipped model and
-//!    from the own-stats models on each playlist's evaluation split, against:
-//!    - **obvious smurfs**, defined without any model: labelled Gold II or lower, Champion I
-//!      mechanics on most aerial stats, and their team won by at least two goals;
-//!    - **party positives**, the label-based proxy (label ≥ 150 over the lobby's median);
-//!    - where the flags land: a flag on a Diamond-or-higher label is most likely wrong.
+//! - **mechanical smurfs**: labelled Gold II or lower, Champion I mechanics on most aerial
+//!   stats, and their team won by at least two. Both variants see these stats, so this set
+//!   favours them, the opponent-independent one most;
+//! - **dominant smurfs**: labelled Gold II or lower, their team won by at least three, and
+//!   they had the most possession and touches in the lobby. Built only from stats the
+//!   opponent-independent variant never sees;
+//! - **party positives**, the label-based proxy (label ≥ 150 over the lobby's median);
+//! - where the flags land: a flag on a Diamond-or-higher label is most likely wrong.
 //!
 //! Usage:
 //!   cargo run --release -p skill_model_training --bin smurf_experiment
@@ -28,16 +26,13 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::Parser;
 use feature_extractor::{MATCH_STAT_NAMES, SLOTS_PER_TEAM, TOTAL_SLOTS};
-use skill_model::SkillModelBundle;
 use skill_model::coaching::tier_index;
-use skill_model_training::dataset::{Lobby, Partition, evaluate, read_lobbies, train_model};
-use skill_model_training::evaluation::{
-    MINIMUM_PLAYERS_PER_LOBBY, PROXY_POSITIVE_MARGIN_MMR, PlayerPrediction,
-    compute_lobby_metrics_with_minimum,
-};
+use skill_model::{OPPONENT_INDEPENDENT_STATS, PlaysLikeModel, TabularLayout};
+use skill_model_training::dataset::{Lobby, Partition, read_lobbies};
+use skill_model_training::evaluation::PROXY_POSITIVE_MARGIN_MMR;
 use skill_model_training::gradient_boosting::GradientBoostingConfig;
 use skill_model_training::label_cleaning::{
     SlotScores, clean_labels, out_of_fold_plays_like, train_plays_like_model,
@@ -45,29 +40,22 @@ use skill_model_training::label_cleaning::{
 use uuid::Uuid;
 
 #[derive(Parser, Debug)]
-#[command(about = "Own-stats smurf scores and label cleaning")]
+#[command(about = "Which stats the plays-like model should see")]
 struct Args {
     #[arg(long, default_value = "data/match_stats.csv")]
     match_stats: PathBuf,
 
-    #[arg(long, default_value = "data/skill_model.bin")]
-    bundle: PathBuf,
-
-    /// Training labels this far below the player's out-of-fold own-stats prediction are
+    /// Training labels this far below the player's out-of-fold plays-like prediction are
     /// dropped as likely smurfs.
     #[arg(long, default_value_t = 300.0)]
     clean_margin: f32,
 
-    /// Flag margins over the lobby's median score to report, in MMR.
-    #[arg(long, value_delimiter = ',', default_value = "100,150,200,300")]
-    flag_margins: Vec<f32>,
-
-    /// Flag margins for the tier-based scores, in tiers (3 tiers = one named rank).
+    /// Flag margins, in divisions over the lobby's median plays-like division.
     #[arg(long, value_delimiter = ',', default_value = "3,4,5,6")]
     tier_margins: Vec<f32>,
 
-    /// Examples to print per playlist.
-    #[arg(long, default_value_t = 8)]
+    /// Examples to print per playlist and variant.
+    #[arg(long, default_value_t = 6)]
     examples: usize,
 }
 
@@ -77,10 +65,10 @@ const TIER_NAMES: [&str; 22] = [
     "C2", "C3", "GC1", "GC2", "GC3", "SSL",
 ];
 
-/// Highest tier an obvious smurf can be labelled with (Gold II).
+/// Highest tier a mechanical or dominant smurf can be labelled with (Gold II).
 const OBVIOUS_MAXIMUM_TIER: usize = 7;
 
-/// Tier whose median mechanics an obvious smurf must reach (Champion I).
+/// Tier whose median mechanics a mechanical smurf must reach (Champion I).
 const OBVIOUS_REFERENCE_TIER: usize = 15;
 
 /// Aerial mechanics compared with the reference tier.
@@ -96,8 +84,11 @@ const MECHANIC_STATS: [&str; 6] = [
 /// How many of [`MECHANIC_STATS`] must reach the reference tier's median.
 const MINIMUM_MECHANICS_AT_REFERENCE: usize = 4;
 
-/// Goals the obvious smurf's team must win by.
+/// Goals a mechanical smurf's team must win by.
 const MINIMUM_GOAL_DIFFERENCE: f32 = 2.0;
+
+/// Goals a dominant smurf's team must win by.
+const DOMINANT_GOAL_DIFFERENCE: f32 = 3.0;
 
 /// Labels at or above this tier (Diamond I) make a flag most likely wrong.
 const HIGH_RANK_TIER: usize = 12;
@@ -127,8 +118,14 @@ const PLAYLISTS: [Playlist; 3] = [
 struct Scorer {
     name: &'static str,
     scores: HashMap<Uuid, SlotScores>,
-    /// Flag margins to report, in the score's unit (MMR, or tiers).
+    /// Flag margins to report, in divisions.
     margins: Vec<f32>,
+}
+
+/// One plays-like variant under test.
+struct Variant {
+    name: &'static str,
+    layout: TabularLayout,
 }
 
 fn stat_index(name: &str) -> usize {
@@ -185,7 +182,12 @@ fn team_goal_difference(lobby: &Lobby, slot: usize) -> f32 {
     team_goals[team] - team_goals[1 - team]
 }
 
-fn is_obvious_smurf(lobby: &Lobby, slot: usize, reference: &[f32; MECHANIC_STATS.len()]) -> bool {
+/// Labelled Gold II or lower, Champion I mechanics on most aerial stats, won by two.
+fn is_mechanical_smurf(
+    lobby: &Lobby,
+    slot: usize,
+    reference: &[f32; MECHANIC_STATS.len()],
+) -> bool {
     let label = lobby.targets[slot];
     let Some(stats) = lobby.stats[slot].as_ref() else {
         return false;
@@ -202,13 +204,37 @@ fn is_obvious_smurf(lobby: &Lobby, slot: usize, reference: &[f32; MECHANIC_STATS
         && team_goal_difference(lobby, slot) >= MINIMUM_GOAL_DIFFERENCE
 }
 
+/// Labelled Gold II or lower, won by three, and the most possession and touches in the
+/// lobby.
+fn is_dominant_smurf(lobby: &Lobby, slot: usize) -> bool {
+    let label = lobby.targets[slot];
+    if label <= 0.0 || tier_index(label) > OBVIOUS_MAXIMUM_TIER {
+        return false;
+    }
+    let leads = |name: &str| {
+        let stat = stat_index(name);
+        let own = lobby.stats[slot].map_or(f32::NEG_INFINITY, |stats| stats[stat]);
+        lobby
+            .stats
+            .iter()
+            .enumerate()
+            .filter(|(other, _)| *other != slot)
+            .filter_map(|(_, stats)| stats.map(|stats| stats[stat]))
+            .all(|value| own > value)
+    };
+    team_goal_difference(lobby, slot) >= DOMINANT_GOAL_DIFFERENCE
+        && leads("possession_fraction")
+        && leads("touches_per_minute")
+}
+
 /// One evaluation player as the flag report sees them.
 struct EvaluatedPlayer {
     replay_id: Uuid,
     slot: usize,
     label: f32,
     goal_difference: f32,
-    obvious: bool,
+    mechanical: bool,
+    dominant: bool,
     /// `Some(true)` when the label is ≥ 150 over the lobby's median label.
     party_positive: Option<bool>,
     /// Score over the lobby's median score, per scorer.
@@ -228,20 +254,16 @@ fn evaluated_players(
             .iter()
             .filter_map(|scorer| scorer.scores.get(&lobby.replay_id))
             .collect();
-        if lobby_scores.len() != scorers.len() {
+        if lobby_scores.len() != scorers.len() || lobby.stats.iter().flatten().count() < 2 {
             continue;
         }
-        let medians: Vec<f32> = lobby_scores
-            .iter()
-            .map(|scores| median(&mut scores.iter().flatten().copied().collect::<Vec<_>>()))
-            .collect();
         let mut labels: Vec<f32> = lobby
             .labelled_slots()
             .map(|slot| lobby.targets[slot])
             .collect();
         let label_median = (labels.len() >= 2).then(|| median(&mut labels));
         for slot in 0..TOTAL_SLOTS {
-            if lobby.stats[slot].is_none() || lobby.stats.iter().flatten().count() < 2 {
+            if lobby.stats[slot].is_none() {
                 continue;
             }
             let label = lobby.targets[slot];
@@ -254,14 +276,25 @@ fn evaluated_players(
                 slot,
                 label,
                 goal_difference: team_goal_difference(lobby, slot),
-                obvious: is_obvious_smurf(lobby, slot, reference),
+                mechanical: is_mechanical_smurf(lobby, slot, reference),
+                dominant: is_dominant_smurf(lobby, slot),
                 party_positive: label_median
                     .filter(|_| label > 0.0)
                     .map(|median| label - median >= PROXY_POSITIVE_MARGIN_MMR),
-                margins: scores
+                // Over the median of the *other* players: in a duel the lobby median is half
+                // way to the smurf, which halves their margin.
+                margins: lobby_scores
                     .iter()
-                    .zip(&medians)
-                    .map(|(score, median)| score - median)
+                    .zip(&scores)
+                    .map(|(lobby_scores, score)| {
+                        let mut others: Vec<f32> = lobby_scores
+                            .iter()
+                            .enumerate()
+                            .filter(|(other, _)| *other != slot)
+                            .filter_map(|(_, score)| *score)
+                            .collect();
+                        score - median(&mut others)
+                    })
                     .collect(),
                 scores,
             });
@@ -271,18 +304,19 @@ fn evaluated_players(
 }
 
 fn print_flag_report(players: &[EvaluatedPlayer], scorers: &[Scorer]) {
-    let obvious = players.iter().filter(|player| player.obvious).count();
+    let mechanical = players.iter().filter(|player| player.mechanical).count();
+    let dominant = players.iter().filter(|player| player.dominant).count();
     let positives = players
         .iter()
         .filter(|player| player.party_positive == Some(true))
         .count();
     println!(
-        "    {} players, {obvious} obvious smurfs, {positives} party positives",
+        "    {} players, {mechanical} mechanical smurfs, {dominant} dominant smurfs, {positives} party positives",
         players.len()
     );
     println!(
-        "    {:<14} {:>7} {:>9} {:>14} {:>16} {:>12}",
-        "flag", "margin", "flagged", "obvious recall", "party precision", "high-rank"
+        "    {:<12} {:>7} {:>9} {:>12} {:>12} {:>16} {:>10}",
+        "plays like", "margin", "flagged", "mechanical", "dominant", "party precision", "high-rank"
     );
     for (index, scorer) in scorers.iter().enumerate() {
         for &margin in &scorer.margins {
@@ -290,7 +324,8 @@ fn print_flag_report(players: &[EvaluatedPlayer], scorers: &[Scorer]) {
                 .iter()
                 .filter(|player| player.margins[index] > margin)
                 .collect();
-            let obvious_flagged = flagged.iter().filter(|player| player.obvious).count();
+            let mechanical_flagged = flagged.iter().filter(|player| player.mechanical).count();
+            let dominant_flagged = flagged.iter().filter(|player| player.dominant).count();
             let checkable = flagged
                 .iter()
                 .filter(|player| player.party_positive.is_some())
@@ -304,12 +339,14 @@ fn print_flag_report(players: &[EvaluatedPlayer], scorers: &[Scorer]) {
                 .filter(|player| player.label > 0.0 && tier_index(player.label) >= HIGH_RANK_TIER)
                 .count();
             println!(
-                "    {:<14} {:>+7.0} {:>8.2}% {:>8}/{:<5} {:>9}/{:<6} {:>11.0}%",
+                "    {:<12} {:>+7.0} {:>8.2}% {:>7}/{:<4} {:>7}/{:<4} {:>9}/{:<6} {:>9.0}%",
                 scorer.name,
                 margin,
                 100.0 * flagged.len() as f64 / players.len().max(1) as f64,
-                obvious_flagged,
-                obvious,
+                mechanical_flagged,
+                mechanical,
+                dominant_flagged,
+                dominant,
                 party_correct,
                 checkable,
                 100.0 * high_rank as f64 / flagged.len().max(1) as f64,
@@ -329,134 +366,99 @@ fn print_examples(players: &[EvaluatedPlayer], scorer_index: usize, count: usize
             "?"
         };
         println!(
-            "    {} slot {}  label {label:<3}  plays like {:<3} ({:+.0} over lobby)  goal difference {:+.0}{}",
+            "      {} slot {}  label {label:<3}  plays like {:<3} (+{:.1} divisions over the others)  goal difference {:+.0}{}",
             player.replay_id,
             player.slot,
-            TIER_NAMES[tier_index(player.scores[scorer_index])],
+            TIER_NAMES[(player.scores[scorer_index] as usize).min(21)],
             player.margins[scorer_index],
             player.goal_difference,
-            if player.obvious { "  obvious" } else { "" },
+            match (player.mechanical, player.dominant) {
+                (true, true) => "  mechanical, dominant",
+                (true, false) => "  mechanical",
+                (false, true) => "  dominant",
+                (false, false) => "",
+            },
         );
     }
 }
 
-fn main_model_metrics(
-    label: &str,
-    lobbies: &[Lobby],
-    model: &skill_model::TabularSkillModel,
-    players_per_team: usize,
-) {
-    let predictions: Vec<PlayerPrediction> = evaluate(lobbies, model)
-        .iter()
-        .map(|scored| scored.prediction)
-        .collect();
-    let metrics = compute_lobby_metrics_with_minimum(
-        &predictions,
-        MINIMUM_PLAYERS_PER_LOBBY.min(players_per_team * 2),
-    );
-    println!(
-        "    {label:<34} within_r={:.3} ±{:.3}  lobby_rmse={:.0}  player_rmse={:.0}  concordance={:.3}",
-        metrics.within_r,
-        metrics.within_r_standard_error,
-        metrics.lobby_rmse,
-        metrics.player_rmse,
-        metrics.concordance,
-    );
+/// How well a variant's plays-like score estimates the label, on evaluation players.
+fn print_accuracy(lobbies: &[Lobby], model: &PlaysLikeModel) {
+    for playlist in &PLAYLISTS {
+        let mut errors = Vec::new();
+        for lobby in lobbies.iter().filter(|lobby| {
+            lobby.partition == Partition::Evaluation
+                && lobby.players_per_team() == Some(playlist.players_per_team)
+        }) {
+            let scores = model.predict_stats(&lobby.stat_references());
+            for slot in lobby.labelled_slots() {
+                if let Some(score) = scores[slot] {
+                    errors.push(f64::from(score - lobby.targets[slot]));
+                }
+            }
+        }
+        let count = errors.len().max(1) as f64;
+        println!(
+            "  {:<9} plays-like vs label: rmse={:.0}  mean error={:+.0}  players={}",
+            playlist.name,
+            (errors.iter().map(|error| error * error).sum::<f64>() / count).sqrt(),
+            errors.iter().sum::<f64>() / count,
+            errors.len(),
+        );
+    }
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
     let config = GradientBoostingConfig::default();
     let lobbies = read_lobbies(&args.match_stats)?;
-    let shipped = SkillModelBundle::from_bytes(
-        &std::fs::read(&args.bundle)
-            .with_context(|| format!("reading {}", args.bundle.display()))?,
-    )
-    .map_err(|error| anyhow::anyhow!("decoding bundle: {error}"))?
-    .match_model;
-
-    println!("== 1. own-stats scores");
-    let out_of_fold = out_of_fold_plays_like(&lobbies, &config);
-    println!("  own-stats model, all training data");
-    let own = train_plays_like_model(&lobbies, &config);
-
+    let variants = [
+        Variant {
+            name: "all stats",
+            layout: PlaysLikeModel::own_stats_layout(),
+        },
+        Variant {
+            name: "independent",
+            layout: PlaysLikeModel::opponent_independent_layout(),
+        },
+    ];
     println!(
-        "== 2. label cleaning (own-stats prediction ≥ label + {})",
-        args.clean_margin
+        "opponent-independent variant: {} of {} stats",
+        OPPONENT_INDEPENDENT_STATS.len(),
+        MATCH_STAT_NAMES.len()
     );
-    let cleaned_labels = clean_labels(&lobbies, &out_of_fold, args.clean_margin);
-    cleaned_labels.counts.print_report();
-    let cleaned = cleaned_labels.lobbies;
-    println!("  own-stats model, cleaned labels");
-    let own_cleaned = train_plays_like_model(&cleaned, &config);
-    println!("  full model, cleaned labels");
-    let main_cleaned = train_model(&cleaned, &shipped.absolute_layout, &config);
 
     let evaluation: Vec<&Lobby> = lobbies
         .iter()
         .filter(|lobby| lobby.partition == Partition::Evaluation)
         .collect();
-    let scores_of = |predict: &dyn Fn(&Lobby) -> SlotScores| -> HashMap<Uuid, SlotScores> {
-        evaluation
-            .iter()
-            .map(|lobby| (lobby.replay_id, predict(lobby)))
-            .collect()
-    };
-    let scorers = [
-        Scorer {
-            name: "shipped",
-            margins: args.flag_margins.clone(),
-            scores: scores_of(&|lobby| shipped.predict_stats(&lobby.stat_references())),
-        },
-        Scorer {
-            name: "full cleaned",
-            margins: args.flag_margins.clone(),
-            scores: scores_of(&|lobby| main_cleaned.predict_stats(&lobby.stat_references())),
-        },
-        Scorer {
-            name: "own",
-            margins: args.flag_margins.clone(),
-            scores: scores_of(&|lobby| own.predict_stats(&lobby.stat_references())),
-        },
-        Scorer {
-            name: "own cleaned",
-            margins: args.flag_margins.clone(),
-            scores: scores_of(&|lobby| own_cleaned.predict_stats(&lobby.stat_references())),
-        },
-        Scorer {
-            name: "own tiers",
+    let mut scorers = Vec::new();
+    for variant in &variants {
+        println!(
+            "== {}: out-of-fold scores, label cleaning (≥ {} MMR), cleaned model",
+            variant.name, args.clean_margin
+        );
+        let out_of_fold = out_of_fold_plays_like(&lobbies, &variant.layout, &config);
+        let cleaned = clean_labels(&lobbies, &out_of_fold, args.clean_margin);
+        cleaned.counts.print_report();
+        let model = train_plays_like_model(&cleaned.lobbies, &variant.layout, &config);
+        print_accuracy(&lobbies, &model);
+        scorers.push(Scorer {
+            name: variant.name,
             margins: args.tier_margins.clone(),
-            scores: scores_of(&|lobby| as_tiers(own.predict_stats(&lobby.stat_references()))),
-        },
-        Scorer {
-            name: "own cl. tiers",
-            margins: args.tier_margins.clone(),
-            scores: scores_of(&|lobby| {
-                as_tiers(own_cleaned.predict_stats(&lobby.stat_references()))
-            }),
-        },
-    ];
-    let own_cleaned_index = 3;
+            scores: evaluation
+                .iter()
+                .map(|lobby| {
+                    (
+                        lobby.replay_id,
+                        as_tiers(model.predict_stats(&lobby.stat_references())),
+                    )
+                })
+                .collect(),
+        });
+    }
 
-    // Evaluation lobbies without the players the raw own-stats model calls smurfs, to see
-    // whether cleaning helps on the players whose labels can be trusted.
-    let evaluation_trusted: Vec<Lobby> = lobbies
-        .iter()
-        .filter(|lobby| lobby.partition == Partition::Evaluation)
-        .map(|lobby| {
-            let mut trusted = lobby.clone();
-            let scores = own.predict_stats(&lobby.stat_references());
-            for (target, score) in trusted.targets.iter_mut().zip(scores) {
-                if *target > 0.0 && score.is_some_and(|score| score - *target >= args.clean_margin)
-                {
-                    *target = 0.0;
-                }
-            }
-            trusted
-        })
-        .collect();
-
-    println!("== 3. evaluation split");
+    println!("== evaluation split");
     for playlist in &PLAYLISTS {
         let playlist_lobbies: Vec<&Lobby> = evaluation
             .iter()
@@ -472,52 +474,13 @@ fn main() -> Result<()> {
             .cloned()
             .collect();
         let reference = reference_mechanics(&all_playlist);
-        println!(
-            "  {} ({} replays); Champion I mechanics medians: {}",
-            playlist.name,
-            playlist_lobbies.len(),
-            MECHANIC_STATS
-                .iter()
-                .zip(&reference)
-                .map(|(name, value)| format!("{name}={value:.2}"))
-                .collect::<Vec<_>>()
-                .join(" ")
-        );
-        let playlist_evaluation: Vec<Lobby> =
-            playlist_lobbies.iter().map(|l| (*l).clone()).collect();
-        let playlist_trusted: Vec<Lobby> = evaluation_trusted
-            .iter()
-            .filter(|lobby| lobby.players_per_team() == Some(playlist.players_per_team))
-            .cloned()
-            .collect();
-        main_model_metrics(
-            "shipped, all labels",
-            &playlist_evaluation,
-            &shipped,
-            playlist.players_per_team,
-        );
-        main_model_metrics(
-            "cleaned, all labels",
-            &playlist_evaluation,
-            &main_cleaned,
-            playlist.players_per_team,
-        );
-        main_model_metrics(
-            "shipped, labels without smurfs",
-            &playlist_trusted,
-            &shipped,
-            playlist.players_per_team,
-        );
-        main_model_metrics(
-            "cleaned, labels without smurfs",
-            &playlist_trusted,
-            &main_cleaned,
-            playlist.players_per_team,
-        );
+        println!("  {} ({} replays)", playlist.name, playlist_lobbies.len());
         let players = evaluated_players(&playlist_lobbies, &scorers, &reference);
         print_flag_report(&players, &scorers);
-        println!("    biggest own-cleaned margins:");
-        print_examples(&players, own_cleaned_index, args.examples);
+        for (index, scorer) in scorers.iter().enumerate() {
+            println!("    biggest {} margins:", scorer.name);
+            print_examples(&players, index, args.examples);
+        }
     }
     Ok(())
 }

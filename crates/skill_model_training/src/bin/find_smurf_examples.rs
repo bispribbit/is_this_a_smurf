@@ -93,11 +93,15 @@ fn median(values: &mut [f32]) -> f32 {
     }
 }
 
-fn flagged_players(lobby: &Lobby, bundle: &SkillModelBundle) -> Vec<FlaggedPlayer> {
+fn flagged_players(
+    lobby: &Lobby,
+    bundle: &SkillModelBundle,
+    players_per_team: usize,
+) -> Vec<FlaggedPlayer> {
     let stats = lobby.stat_references();
     let match_mmr = bundle.match_model.predict_stats(&stats);
     let plays_like_mmr = bundle.plays_like_model.predict_stats(&stats);
-    let flags = smurf_suspicions(&match_mmr, &plays_like_mmr);
+    let flags = smurf_suspicions(&match_mmr, &plays_like_mmr, players_per_team);
     let lowest_tier = plays_like_mmr
         .iter()
         .flatten()
@@ -156,7 +160,7 @@ fn main() -> Result<()> {
 
     let mut flagged: Vec<FlaggedPlayer> = lobbies
         .iter()
-        .flat_map(|lobby| flagged_players(lobby, &bundle))
+        .flat_map(|lobby| flagged_players(lobby, &bundle, args.players_per_team))
         .collect();
     let players: usize = lobbies
         .iter()

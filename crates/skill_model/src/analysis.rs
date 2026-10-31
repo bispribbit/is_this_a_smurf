@@ -97,7 +97,11 @@ impl SkillModelBundle {
         }
         let match_mmr = self.match_model.predict(&match_stats);
         let plays_like_mmr = self.plays_like_model.predict(&match_stats);
-        let smurf = smurf_suspicions(&match_mmr, &plays_like_mmr);
+        let smurf = smurf_suspicions(
+            &match_mmr,
+            &plays_like_mmr,
+            parsed.match_format.players_per_team,
+        );
         let coaching_table = self
             .coaching
             .for_players_per_team(parsed.match_format.players_per_team);
