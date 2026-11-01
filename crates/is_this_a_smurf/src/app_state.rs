@@ -30,6 +30,8 @@ pub(crate) struct PlayerAverage {
     pub(crate) smurf: Option<skill_model::SmurfReason>,
     /// The rank their own stats play like, when that is why they are flagged.
     pub(crate) plays_like: Option<RankDivision>,
+    /// "Forfeited while ahead (3–1)" when they are flagged for forfeiting while level or ahead.
+    pub(crate) forfeit: Option<String>,
     /// The mechanics they do far more than the lobby's rank, e.g. "Speed flips like a
     /// Champ I · flip resets like a GC I": shown for flagged players, and for anyone doing
     /// several.

@@ -30,7 +30,7 @@ use crate::branding::IS_THIS_A_SMURF_HERO;
 use crate::browser_async::{sleep_milliseconds, yield_for_dom_paint, yield_to_ui};
 use crate::embedded_model::load_bundle;
 use crate::prediction::{
-    build_goal_markers, build_prediction_results, compute_segment_boundary_play_times,
+    FinalScore, build_goal_markers, build_prediction_results, compute_segment_boundary_play_times,
     compute_segment_boundary_times, prepare_players_for_timeline, ranks_from_player_mmr,
     segment_step_infos,
 };
@@ -336,6 +336,10 @@ pub(super) async fn run_pipeline(
     // ---- Cards and verdict.
     publish(
         progress_after_model(segment_steps, timeline),
-        Some(build_prediction_results(&analysis, parsed.match_format)),
+        Some(build_prediction_results(
+            &analysis,
+            parsed.match_format,
+            FinalScore::from_replay(&parsed),
+        )),
     );
 }

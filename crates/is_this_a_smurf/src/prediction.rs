@@ -262,9 +262,62 @@ fn mechanics_line(
         .map(|first| first.to_uppercase().chain(characters).collect())
 }
 
+/// Goals per team at the end of the match.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct FinalScore {
+    blue: u32,
+    orange: u32,
+}
+
+/// A team's goals and its opponents'.
+struct TeamScore {
+    own: u32,
+    opponents: u32,
+}
+
+impl FinalScore {
+    /// Counted from the half the ball went in (blue attacks +y), so own goals count for the
+    /// team they were scored for, as the match stats do.
+    pub(crate) fn from_replay(parsed: &ParsedReplay) -> Self {
+        let mut score = Self::default();
+        for goal in &parsed.goals {
+            let Some(frame) = parsed.frames.get(goal.frame) else {
+                continue;
+            };
+            if frame.ball.position.y >= 0.0 {
+                score.blue += 1;
+            } else {
+                score.orange += 1;
+            }
+        }
+        score
+    }
+
+    const fn for_team(self, team: Team) -> TeamScore {
+        match team {
+            Team::Blue => TeamScore {
+                own: self.blue,
+                opponents: self.orange,
+            },
+            Team::Orange => TeamScore {
+                own: self.orange,
+                opponents: self.blue,
+            },
+        }
+    }
+}
+
+/// "Forfeited while ahead (3–1)" or "Forfeited while level (2–2)", the player's team first.
+fn forfeit_line(score: FinalScore, team: Team) -> String {
+    let TeamScore { own, opponents } = score.for_team(team);
+    let standing = if own > opponents { "ahead" } else { "level" };
+    format!("Forfeited while {standing} ({own}–{opponents})")
+}
+
 pub(crate) fn build_prediction_results(
     analysis: &MatchAnalysis,
     match_format: MatchFormat,
+    final_score: FinalScore,
 ) -> PredictionResults {
     let mut random = rng();
     let player_averages = (0..TOTAL_SLOTS)
@@ -277,14 +330,17 @@ pub(crate) fn build_prediction_results(
                     Some(SmurfReason::PlaysAboveLobby | SmurfReason::DerankingAboveLobby)
                 )
             });
+            let team = MatchAnalysis::team(slot);
             Some(PlayerAverage {
                 name: analysis.names[slot].clone(),
-                team: MatchAnalysis::team(slot),
+                team,
                 mmr,
                 rank: RankDivision::from(mmr),
                 next_rank_roast: analysis.roast(slot, random.random_range(0..usize::MAX)),
                 smurf: analysis.smurf[slot],
                 plays_like: plays_like.map(RankDivision::from),
+                forfeit: (analysis.smurf[slot] == Some(SmurfReason::DerankingAboveLobby))
+                    .then(|| forfeit_line(final_score, team)),
                 mechanics: mechanics_line(
                     &analysis.mechanics[slot],
                     analysis.smurf[slot].is_some(),

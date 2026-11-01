@@ -253,10 +253,8 @@ fn TeamSummaryCard(
                                 } else {
                                     p { class: "text-sm text-gray-500", "{player.rank}" }
                                 }
-                                if player.smurf == Some(skill_model::SmurfReason::DerankingAboveLobby) {
-                                    p { class: "text-sm font-semibold text-red-400",
-                                        "Forfeited while level or ahead"
-                                    }
+                                if let Some(forfeit) = &player.forfeit {
+                                    p { class: "text-sm font-semibold text-red-400", "{forfeit}" }
                                 }
                                 if let Some(mechanics) = &player.mechanics {
                                     p { class: "text-xs font-medium text-amber-300 leading-snug",
