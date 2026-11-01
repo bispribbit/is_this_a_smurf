@@ -32,6 +32,7 @@ pub use plays_like::{
     GroupPrediction, PlaysLikeGroup, PlaysLikeGroups, PlaysLikePredictions, STAT_GROUPS, StatGroup,
 };
 pub use smurf::{
-    MINIMUM_MECHANICS_ABOVE_LOBBY, SMURF_MARGIN_OVER_LOBBY_MEDIAN_MMR, SmurfReason,
-    plays_like_margins, smurf_margin_over_others_tiers, smurf_suspicions,
+    DERANKING_MINIMUM_MARGIN_TIERS, MINIMUM_MECHANICS_ABOVE_LOBBY,
+    SMURF_MARGIN_OVER_LOBBY_MEDIAN_MMR, SlotEvidence, SmurfReason, plays_like_margins,
+    smurf_margin_over_others_tiers, smurf_suspicions,
 };

@@ -134,7 +134,7 @@ fn players(
         let flags = smurf_suspicions(
             &match_mmr,
             &bundle.plays_like_groups.predict_stats(&stats),
-            &mechanics.each_ref().map(Vec::len),
+            &skill_model::SlotEvidence::per_slot(&mechanics, &stats),
             players_per_team,
         );
         for slot in lobby.labelled_slots() {

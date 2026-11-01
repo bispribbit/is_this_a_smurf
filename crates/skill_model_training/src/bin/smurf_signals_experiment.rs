@@ -54,7 +54,7 @@ use skill_model_training::label_cleaning::{
 use skill_model_training::mechanic_table::build_mechanic_tables;
 use skill_model_training::smurf_references::{
     HIGH_RANK_TIER, MECHANIC_STATS, as_tiers, is_dominant_smurf, is_mechanical_smurf, median,
-    reference_mechanics,
+    reference_mechanics, stat_index,
 };
 use uuid::Uuid;
 
@@ -261,6 +261,8 @@ struct EvaluatedPlayer {
     margins: Vec<f32>,
     /// Per mechanic table: mechanics above the lobby tier's high quantile.
     mechanics_above: Vec<usize>,
+    /// Their team lost by forfeit while level or ahead on goals.
+    forfeited_level_or_ahead: bool,
 }
 
 fn evaluated_players(
@@ -304,6 +306,7 @@ fn evaluated_players(
                 mechanical: is_mechanical_smurf(lobby, slot, references.for_lobby(lobby)),
                 dominant: is_dominant_smurf(lobby, slot),
                 margins,
+                forfeited_level_or_ahead: stats[stat_index("forfeited_level_or_ahead")] > 0.0,
                 mechanics_above: mechanic_tables
                     .iter()
                     .map(|tables| {
@@ -604,6 +607,40 @@ fn main() -> Result<()> {
                     &union,
                 );
             }
+        }
+
+        // Deranking: forfeited while level or ahead, and playing above the lobby by less
+        // than the full margin. Added to the shipped-like flag: weighted groups or four
+        // mechanics above the 95th percentile.
+        let current: Vec<bool> = players
+            .iter()
+            .zip(&weighted_flags)
+            .map(|(player, weighted)| *weighted || player.mechanics_above[1] >= 4)
+            .collect();
+        let throwers = players
+            .iter()
+            .filter(|player| player.forfeited_level_or_ahead)
+            .count();
+        println!("    deranking ({throwers} players forfeited while level or ahead):");
+        print_fixed_rule(&players, "current (weighted or 4+ above p95)", &current);
+        for minimum_margin in [f32::NEG_INFINITY, 0.0, 1.0, 2.0, 3.0] {
+            let deranking: Vec<bool> = players
+                .iter()
+                .zip(&weighted_scores)
+                .map(|(player, margin)| player.forfeited_level_or_ahead && *margin > minimum_margin)
+                .collect();
+            let name = if minimum_margin.is_finite() {
+                format!("forfeit level/ahead, margin > {minimum_margin:.0}")
+            } else {
+                "forfeit level/ahead, any margin".to_owned()
+            };
+            print_fixed_rule(&players, &name, &deranking);
+            let union: Vec<bool> = deranking
+                .iter()
+                .zip(&current)
+                .map(|(deranking, current)| *deranking || *current)
+                .collect();
+            print_fixed_rule(&players, &format!("current or {name}"), &union);
         }
     }
     Ok(())

@@ -247,7 +247,12 @@ pub(crate) fn build_prediction_results(
                 }),
                 smurf: analysis.smurf[slot],
                 plays_like: analysis.plays_like_mmr[slot]
-                    .filter(|_| analysis.smurf[slot] == Some(SmurfReason::PlaysAboveLobby))
+                    .filter(|_| {
+                        matches!(
+                            analysis.smurf[slot],
+                            Some(SmurfReason::PlaysAboveLobby | SmurfReason::DerankingAboveLobby)
+                        )
+                    })
                     .map(RankDivision::from),
                 mechanics: mechanics_line(
                     &analysis.mechanics[slot],

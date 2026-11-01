@@ -26,6 +26,9 @@ const PREDICTED_RANK_ROAST_LABELS: [&str; 10] = [
 const fn smurf_badge_text(reason: skill_model::SmurfReason) -> &'static str {
     match reason {
         skill_model::SmurfReason::RankedAboveLobby => "Predicted rank is much higher than lobby",
+        skill_model::SmurfReason::DerankingAboveLobby => {
+            "Forfeited while level or ahead, and plays above this lobby: deranking?"
+        }
         skill_model::SmurfReason::PlaysAboveLobby => "Plays several ranks above this lobby",
         skill_model::SmurfReason::MechanicsAboveLobby => {
             "Does several mechanics far above this lobby's rank"
@@ -255,6 +258,11 @@ fn TeamSummaryCard(
                                 if let Some(plays_like) = &player.plays_like {
                                     p { class: "text-sm font-semibold text-red-400",
                                         "Plays like {plays_like}"
+                                    }
+                                }
+                                if player.smurf == Some(skill_model::SmurfReason::DerankingAboveLobby) {
+                                    p { class: "text-sm font-semibold text-red-400",
+                                        "Forfeited while level or ahead"
                                     }
                                 }
                                 if let Some(mechanics) = &player.mechanics {

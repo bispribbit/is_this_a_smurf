@@ -82,8 +82,14 @@ Lines and tips live in code; editing them needs no retraining.
 ### 5. Smurf flag (`crates/skill_model/src/smurf.rs`)
 
 `smurf_suspicions` is the one rule the badge, the verdict and the evaluation tools share. A
-player is flagged for the first of three reasons that applies:
+player is flagged for the first of four reasons that applies:
 
+- **deranking**: their team forfeited while level or ahead on goals, and they play above the
+  other players at all (weighted plays-like margin over 0, `DERANKING_MINIMUM_MARGIN_TIERS`).
+  The card says "Forfeited while level or ahead". Only 2 % of these flags landed on
+  Diamond-and-up players; in duels it caught four more of 61 dominant smurfs, in doubles it
+  flags 0.8 % more players (none of the references, which need a won match), and in
+  standard it barely fires, since a whole team has to agree to forfeit;
 - **ranked above the lobby**: their match-model prediction is more than 100 MMR over the
   lobby's median (`SMURF_MARGIN_OVER_LOBBY_MEDIAN_MMR`). It finds parties carrying a weaker
   friend in standard, and almost never fires in duels or doubles: the match model learns
@@ -272,8 +278,8 @@ replays), which no part of training sees. Labels are account ranks at match time
 Duels and doubles are scored on 400 to 800 players, so their within_r carries ±0.05; over
 three seeds duels within_r is 0.23 ± 0.05 (`compare_stat_sets`).
 
-The smurf flag ([section 5](#5-smurf-flag-cratesskill_modelsrcsmurfrs)) fires on 7.5 % of
-duels players, 7.2 % of doubles and 5.5 % of standard. Labels cannot confirm a real smurf
+The smurf flag ([section 5](#5-smurf-flag-cratesskill_modelsrcsmurfrs)) fires on 9.1 % of
+duels players (3.1 % deranking), 7.9 % of doubles (2.0 % deranking) and 5.5 % of standard. Labels cannot confirm a real smurf
 (their label is the smurf account's), so it was chosen with `smurf_signals_experiment`
 against two references, at about the shipped flag rate:
 

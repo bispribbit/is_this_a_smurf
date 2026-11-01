@@ -113,7 +113,7 @@ impl SkillModelBundle {
         let smurf = smurf_suspicions(
             &match_mmr,
             &plays_like,
-            &mechanics.each_ref().map(Vec::len),
+            &crate::smurf::SlotEvidence::per_slot(&mechanics, &stat_values),
             parsed.match_format.players_per_team,
         );
 

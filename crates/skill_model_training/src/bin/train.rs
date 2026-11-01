@@ -176,6 +176,7 @@ fn print_smurf_report(
         let mut ranked_above = 0usize;
         let mut plays_above = 0usize;
         let mut mechanics_above = 0usize;
+        let mut deranking = 0usize;
         let mut positives = 0usize;
         let mut flagged_positives = 0usize;
         for lobby in lobbies.iter().filter(|lobby| {
@@ -194,7 +195,7 @@ fn print_smurf_report(
             let flags = smurf_suspicions(
                 &match_mmr,
                 &plays_like,
-                &mechanics.each_ref().map(Vec::len),
+                &skill_model::SlotEvidence::per_slot(&mechanics, &stats),
                 playlist.players_per_team,
             );
             let mut labels: Vec<f32> = lobby
@@ -219,6 +220,7 @@ fn print_smurf_report(
                     Some(SmurfReason::RankedAboveLobby) => ranked_above += 1,
                     Some(SmurfReason::PlaysAboveLobby) => plays_above += 1,
                     Some(SmurfReason::MechanicsAboveLobby) => mechanics_above += 1,
+                    Some(SmurfReason::DerankingAboveLobby) => deranking += 1,
                     None => {}
                 }
                 let positive = lobby.targets[slot] > 0.0
@@ -233,12 +235,14 @@ fn print_smurf_report(
             continue;
         }
         println!(
-            "  {:<9} flags {:.2}% of players ({:.2}% ranked above the lobby, {:.2}% play above it, {:.2}% mechanics above it)  party positives caught {flagged_positives}/{positives}",
+            "  {:<9} flags {:.2}% of players ({:.2}% ranked above the lobby, {:.2}% play above it, {:.2}% mechanics above it, {:.2}% deranking)  party positives caught {flagged_positives}/{positives}",
             playlist.name,
-            100.0 * (ranked_above + plays_above + mechanics_above) as f64 / players as f64,
+            100.0 * (ranked_above + plays_above + mechanics_above + deranking) as f64
+                / players as f64,
             100.0 * ranked_above as f64 / players as f64,
             100.0 * plays_above as f64 / players as f64,
             100.0 * mechanics_above as f64 / players as f64,
+            100.0 * deranking as f64 / players as f64,
         );
         let rates: Vec<String> = [2.0, 2.5, 3.0, 3.5, 4.0, 4.5]
             .iter()

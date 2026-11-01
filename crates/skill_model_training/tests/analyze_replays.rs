@@ -129,6 +129,9 @@ mod tests {
                     Some(skill_model::SmurfReason::RankedAboveLobby) => {
                         "SMURF (ranked)".to_string()
                     }
+                    Some(skill_model::SmurfReason::DerankingAboveLobby) => {
+                        "SMURF (forfeited while level or ahead)".to_string()
+                    }
                     Some(skill_model::SmurfReason::MechanicsAboveLobby) => format!(
                         "SMURF (mechanics: {})",
                         analysis

@@ -111,7 +111,7 @@ fn flagged_players(
     let flags = smurf_suspicions(
         &match_mmr,
         &plays_like,
-        &mechanics.each_ref().map(Vec::len),
+        &skill_model::SlotEvidence::per_slot(&mechanics, &stats),
         players_per_team,
     );
     let lowest_tier = plays_like_mmr
@@ -186,9 +186,10 @@ fn main() -> Result<()> {
     };
     let confirmed = flagged.iter().filter(|player| player.confirmed()).count();
     println!(
-        "{} evaluation replays, {players} players: {} flagged ({} ranked above the lobby, {} play above it, {} mechanics above it), {confirmed} confirmed by labels",
+        "{} evaluation replays, {players} players: {} flagged ({} deranking, {} ranked above the lobby, {} play above it, {} mechanics above it), {confirmed} confirmed by labels",
         lobbies.len(),
         flagged.len(),
+        with_reason(SmurfReason::DerankingAboveLobby),
         with_reason(SmurfReason::RankedAboveLobby),
         with_reason(SmurfReason::PlaysAboveLobby),
         with_reason(SmurfReason::MechanicsAboveLobby),
@@ -207,6 +208,7 @@ fn main() -> Result<()> {
             player.slot,
             match player.reason {
                 SmurfReason::RankedAboveLobby => "ranked",
+                SmurfReason::DerankingAboveLobby => "deranking",
                 SmurfReason::PlaysAboveLobby => "plays",
                 SmurfReason::MechanicsAboveLobby => "mechanics",
             },

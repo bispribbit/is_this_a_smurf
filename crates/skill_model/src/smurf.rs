@@ -1,8 +1,13 @@
 //! The smurf flag: the single definition the app's badge, its verdict copy and the offline
 //! evaluation tools all use.
 //!
-//! A player is flagged for one of three reasons:
+//! A player is flagged for the first of four reasons that applies:
 //!
+//! * **deranking** — their team forfeited while level or ahead on goals and they play above
+//!   the other players (weighted margin over [`DERANKING_MINIMUM_MARGIN_TIERS`]). Throwing
+//!   a match you are not losing is how smurf accounts are kept low: it happens to 12 % of
+//!   Bronze duelists and under 1 % from Diamond up. Only 2 % of these flags landed on
+//!   Diamond-and-up players, and in duels it caught four more of 61 dominant smurfs;
 //! * **ranked above the lobby** — their whole-match prediction is
 //!   [`SMURF_MARGIN_OVER_LOBBY_MEDIAN_MMR`] over the lobby's median. It mostly finds
 //!   parties carrying a weaker friend in standard; in duels and doubles it almost never
@@ -20,11 +25,12 @@
 //!   to the others: in duels it caught three more of 14 mechanical and four more of 61
 //!   dominant smurfs for one more percent flagged.
 //!
-//! `docs/model.md` has how both margins were chosen.
+//! `docs/model.md` has how the margins were chosen.
 
-use feature_extractor::TOTAL_SLOTS;
+use feature_extractor::{MATCH_STAT_COUNT, MATCH_STAT_NAMES, TOTAL_SLOTS};
 
 use crate::coaching::tier_index;
+use crate::mechanics::MechanicEvidence;
 use crate::plays_like::PlaysLikePredictions;
 
 /// Margin above the lobby's median whole-match prediction at which a player is flagged.
@@ -53,6 +59,44 @@ pub const fn smurf_margin_over_others_tiers(players_per_team: usize) -> f32 {
 /// Named mechanics above the lobby's tier that flag a player on their own.
 pub const MINIMUM_MECHANICS_ABOVE_LOBBY: usize = 4;
 
+/// Weighted plays-like margin a player who forfeited while level or ahead must exceed: any
+/// lead over the others. A forfeit alone also catches frustrated real players.
+pub const DERANKING_MINIMUM_MARGIN_TIERS: f32 = 0.0;
+
+/// What a player did besides how they played: the inputs of the smurf flag beyond the
+/// predictions.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SlotEvidence {
+    /// Named mechanics done above the other players' tier
+    /// ([`crate::mechanics::mechanics_above_lobby`]).
+    pub mechanics_above: usize,
+    /// Their team lost by forfeit while level or ahead on goals.
+    pub forfeited_level_or_ahead: bool,
+}
+
+impl SlotEvidence {
+    /// Evidence per slot from the mechanics above the lobby and the match stats.
+    #[must_use]
+    pub fn per_slot(
+        mechanics: &[Vec<MechanicEvidence>; TOTAL_SLOTS],
+        players: &[Option<&[f32; MATCH_STAT_COUNT]>; TOTAL_SLOTS],
+    ) -> [Self; TOTAL_SLOTS] {
+        let forfeited = MATCH_STAT_NAMES
+            .iter()
+            .position(|name| *name == "forfeited_level_or_ahead");
+        core::array::from_fn(|slot| Self {
+            mechanics_above: mechanics.get(slot).map_or(0, Vec::len),
+            forfeited_level_or_ahead: players
+                .get(slot)
+                .copied()
+                .flatten()
+                .zip(forfeited)
+                .and_then(|found| found.0.get(found.1).copied())
+                .is_some_and(|value| value > 0.0),
+        })
+    }
+}
+
 /// Why a player is flagged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[expect(
@@ -60,6 +104,8 @@ pub const MINIMUM_MECHANICS_ABOVE_LOBBY: usize = 4;
     reason = "every reason is a way of standing above the lobby"
 )]
 pub enum SmurfReason {
+    /// Forfeited while level or ahead, and plays above the other players: deranking.
+    DerankingAboveLobby,
     /// Whole-match prediction well above the lobby's.
     RankedAboveLobby,
     /// Plays several divisions above the other players (and is not already ranked above
@@ -143,9 +189,8 @@ pub fn plays_like_margins(
     })
 }
 
-/// Flags per slot from the whole-match and plays-like predictions and, per slot, how many
-/// named mechanics the player does above the lobby's tier
-/// ([`crate::mechanics::mechanics_above_lobby`]).
+/// Flags per slot from the whole-match and plays-like predictions and each slot's
+/// [`SlotEvidence`].
 ///
 /// `players_per_team` picks the playlist's margin. A lobby with fewer than two scored
 /// players has no one to compare with and flags nobody.
@@ -153,7 +198,7 @@ pub fn plays_like_margins(
 pub fn smurf_suspicions(
     match_mmr: &[Option<f32>; TOTAL_SLOTS],
     plays_like: &PlaysLikePredictions,
-    mechanics_above: &[usize; TOTAL_SLOTS],
+    evidence: &[SlotEvidence; TOTAL_SLOTS],
     players_per_team: usize,
 ) -> [Option<SmurfReason>; TOTAL_SLOTS] {
     let mut predictions: Vec<f32> = match_mmr.iter().flatten().copied().collect();
@@ -164,21 +209,22 @@ pub fn smurf_suspicions(
     let margins = plays_like_margins(match_mmr, plays_like);
     let tier_margin = smurf_margin_over_others_tiers(players_per_team);
     let mut flags = [None; TOTAL_SLOTS];
-    for (((flag, mmr), margin), mechanics) in flags
-        .iter_mut()
-        .zip(match_mmr)
-        .zip(margins)
-        .zip(mechanics_above)
+    for (((flag, mmr), margin), evidence) in
+        flags.iter_mut().zip(match_mmr).zip(margins).zip(evidence)
     {
         let ranked_above = mmr
             .zip(prediction_median)
             .is_some_and(|(mmr, median)| mmr > median + SMURF_MARGIN_OVER_LOBBY_MEDIAN_MMR);
         let plays_above = margin.is_some_and(|margin| margin > tier_margin);
-        *flag = if ranked_above {
+        let deranking = evidence.forfeited_level_or_ahead
+            && margin.is_some_and(|margin| margin > DERANKING_MINIMUM_MARGIN_TIERS);
+        *flag = if deranking {
+            Some(SmurfReason::DerankingAboveLobby)
+        } else if ranked_above {
             Some(SmurfReason::RankedAboveLobby)
         } else if plays_above {
             Some(SmurfReason::PlaysAboveLobby)
-        } else if *mechanics >= MINIMUM_MECHANICS_ABOVE_LOBBY {
+        } else if evidence.mechanics_above >= MINIMUM_MECHANICS_ABOVE_LOBBY {
             Some(SmurfReason::MechanicsAboveLobby)
         } else {
             None
@@ -218,13 +264,18 @@ mod tests {
         groups(&[TestGroup { weight: 1.0, mmr }])
     }
 
+    const NO_EVIDENCE: [SlotEvidence; TOTAL_SLOTS] = [SlotEvidence {
+        mechanics_above: 0,
+        forfeited_level_or_ahead: false,
+    }; TOTAL_SLOTS];
+
     #[test]
     fn a_duel_flags_the_player_who_plays_far_above() {
         // Both ranked Bronze I by the match model; one plays like a Champion I.
         let flags = smurf_suspicions(
             &slots(&[100.0, 110.0]),
             &one_group(&[1100.0, 100.0]),
-            &[0; TOTAL_SLOTS],
+            &NO_EVIDENCE,
             1,
         );
         assert_eq!(flags[0], Some(SmurfReason::PlaysAboveLobby));
@@ -254,7 +305,7 @@ mod tests {
         let flags = smurf_suspicions(
             &slots(&[300.0, 300.0, 300.0, 600.0]),
             &one_group(&[290.0, 290.0, 290.0, 1100.0]),
-            &[0; TOTAL_SLOTS],
+            &NO_EVIDENCE,
             2,
         );
         assert_eq!(flags[3], Some(SmurfReason::RankedAboveLobby));
@@ -265,20 +316,39 @@ mod tests {
         let flags = smurf_suspicions(
             &slots(&[2000.0]),
             &one_group(&[2000.0]),
-            &[MINIMUM_MECHANICS_ABOVE_LOBBY; TOTAL_SLOTS],
+            &[SlotEvidence {
+                mechanics_above: MINIMUM_MECHANICS_ABOVE_LOBBY,
+                forfeited_level_or_ahead: true,
+            }; TOTAL_SLOTS],
             1,
         );
         assert!(flags.iter().all(Option::is_none));
     }
 
     #[test]
+    fn forfeiting_while_level_flags_only_who_plays_above() {
+        // Both forfeited a level duel; slot 0 plays a little above, slot 1 below.
+        let mut evidence = NO_EVIDENCE;
+        evidence[0].forfeited_level_or_ahead = true;
+        evidence[1].forfeited_level_or_ahead = true;
+        let flags = smurf_suspicions(
+            &slots(&[500.0, 500.0]),
+            &one_group(&[620.0, 500.0]),
+            &evidence,
+            1,
+        );
+        assert_eq!(flags[0], Some(SmurfReason::DerankingAboveLobby));
+        assert_eq!(flags[1], None);
+    }
+
+    #[test]
     fn enough_mechanics_above_the_lobby_flag_on_their_own() {
-        let mut mechanics = [0; TOTAL_SLOTS];
-        mechanics[1] = MINIMUM_MECHANICS_ABOVE_LOBBY;
+        let mut evidence = NO_EVIDENCE;
+        evidence[1].mechanics_above = MINIMUM_MECHANICS_ABOVE_LOBBY;
         let flags = smurf_suspicions(
             &slots(&[500.0, 500.0]),
             &one_group(&[500.0, 500.0]),
-            &mechanics,
+            &evidence,
             1,
         );
         assert_eq!(flags[0], None);
