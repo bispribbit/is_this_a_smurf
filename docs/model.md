@@ -250,6 +250,9 @@ cargo run --release -p skill_model_training --bin smurf_signals_experiment
 # Low-rank players doing each mechanic at a Champion I rate, and whether the flag catches them
 cargo run --release -p skill_model_training --bin mechanic_smurfs
 
+# Per-game or per-account label cleaning, over seeds (needs data/accounts.csv from extract_stats)
+cargo run --release -p skill_model_training --bin compare_cleaning
+
 # Whole-match model with and without the named-mechanics stats, over seeds
 cargo run --release -p skill_model_training --bin compare_stat_sets
 
@@ -339,6 +342,17 @@ tree model replaced it in October 2026. What is worth remembering:
   those players do speed flips, wavedashes, flip resets and double taps 2 to 10 times as
   often as others at their rank. A plain loss by forfeit is common at every rank (10 to
   20 %). Adding the forfeit stats lifted duels within_r from 0.24 to 0.29 in one run.
+
+- **Several games per player cut the error, but not through the labels.** Ballchasing account
+  ids match 170k player-games to 107k accounts. Averaging an account's predictions over 3 games
+  cuts rank RMSE by 16 to 22 % (5 games: 20 to 30 %), about half what pure game-to-game noise
+  would give, so half the error is the player's style against their rank. Cleaning labels by
+  account (dropping all of an account's labels when it plays 300+ above them on average,
+  keeping one standout game) swapped ~2,000 labels and changed nothing beyond seed noise
+  (`compare_cleaning`). Players whose account is also in training are predicted worse, not
+  better (mostly frequent uploaders), so the evaluation split is not inflated by leakage.
+  Account history gives almost no smurf labels: only 5 accounts climb 6+ tiers within a month
+  (smurf alts rarely upload); the 86 big climbers took ~1.5 years.
 
 ## Ideas not tried yet
 

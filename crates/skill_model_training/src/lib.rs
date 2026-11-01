@@ -6,6 +6,7 @@
 //! the bundle the app embeds. The other binaries are experiments.
 //! See `docs/model.md`.
 
+pub mod account_cleaning;
 pub mod coaching_table;
 pub mod dataset;
 pub mod evaluation;

@@ -19,6 +19,7 @@ anyhow.workspace = true
 clap.workspace = true
 csv.workspace = true
 rayon.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

@@ -26,3 +26,4 @@ test_data/*.json
 # Per-player stats extracted for training (`extract_stats`): regenerable and large.
 data/*_stats.csv
 data/predictions.csv
+data/accounts.csv

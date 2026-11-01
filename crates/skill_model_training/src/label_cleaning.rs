@@ -242,6 +242,17 @@ pub fn clean_labels(
     out_of_fold: &PlaysLikeScores,
     margin: f32,
 ) -> CleanedLabels {
+    clean_labels_where(lobbies, out_of_fold, |_, gap| gap >= margin)
+}
+
+/// Drops every label for which `should_drop(player, gap)` holds, `gap` being the
+/// out-of-fold plays-like prediction minus the label.
+#[must_use]
+pub fn clean_labels_where(
+    lobbies: &[Lobby],
+    out_of_fold: &PlaysLikeScores,
+    should_drop: impl Fn(PlayerKey, f32) -> bool,
+) -> CleanedLabels {
     let mut cleaned = CleanedLabels {
         lobbies: lobbies.to_vec(),
         dropped: DroppedLabels::default(),
@@ -260,13 +271,14 @@ pub fn clean_labels(
                 continue;
             }
             cleaned.counts.labelled_by_playlist[playlist] += 1;
-            if score - *target >= margin {
+            let player = PlayerKey {
+                replay_id: lobby.replay_id,
+                slot,
+            };
+            if should_drop(player, score - *target) {
                 cleaned.counts.dropped_by_playlist[playlist] += 1;
                 cleaned.counts.dropped_by_tier[tier_index(*target)] += 1;
-                cleaned.dropped.players.insert(PlayerKey {
-                    replay_id: lobby.replay_id,
-                    slot,
-                });
+                cleaned.dropped.players.insert(player);
                 *target = 0.0;
             }
         }

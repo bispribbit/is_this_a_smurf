@@ -2,7 +2,8 @@
 //!
 //! Writes two CSVs in one pass: whole-match stats (one row per player per replay) and
 //! window stats (one row per player per window of `--window-seconds` of live play, with a
-//! trailing `window_index` column). Slots follow the app's convention: blue sorted by name,
+//! trailing `window_index` column). A third CSV maps each (replay, slot) to the player's
+//! account id from the Ballchasing metadata, for account-level label cleaning. Slots follow the app's convention: blue sorted by name,
 //! then orange. Labels come from the database; `0` means the rank is unknown.
 //!
 //! Usage:
@@ -42,6 +43,10 @@ struct Args {
     #[arg(long, default_value = "data/window_stats.csv")]
     window_out: PathBuf,
 
+    /// Account id per (replay, slot) CSV.
+    #[arg(long, default_value = "data/accounts.csv")]
+    accounts_out: PathBuf,
+
     /// Window length in seconds of live play. Must match what the app uses.
     #[arg(long, default_value_t = 60.0)]
     window_seconds: f32,
@@ -62,6 +67,8 @@ struct PendingReplay {
     file_path: String,
     roster: PlayerRoster,
     targets: [f32; TOTAL_SLOTS],
+    /// "platform:id" per slot, from the Ballchasing metadata.
+    accounts: [Option<String>; TOTAL_SLOTS],
 }
 
 /// One output row.
@@ -167,6 +174,53 @@ fn process(pending: &PendingReplay, base_path: &Path, window_seconds: f32) -> Re
     }
 }
 
+/// "platform:id" of each roster slot, matched by team and name in the Ballchasing metadata.
+fn account_ids(
+    metadata: &serde_json::Value,
+    roster: &PlayerRoster,
+) -> [Option<String>; TOTAL_SLOTS] {
+    core::array::from_fn(|slot| {
+        let name = roster.names.get(slot).filter(|name| !name.is_empty())?;
+        let team = if slot < SLOTS_PER_TEAM {
+            "blue"
+        } else {
+            "orange"
+        };
+        let player = metadata
+            .get(team)?
+            .get("players")?
+            .as_array()?
+            .iter()
+            .find(|player| player.get("name").and_then(serde_json::Value::as_str) == Some(name))?;
+        let id = player.get("id")?;
+        let platform = id.get("platform")?.as_str()?;
+        let account = id.get("id")?.as_str()?;
+        (!account.is_empty()).then(|| format!("{platform}:{account}"))
+    })
+}
+
+fn write_accounts_csv(path: &Path, pending: &[PendingReplay]) -> Result<()> {
+    let mut out = std::io::BufWriter::new(
+        std::fs::File::create(path).with_context(|| format!("creating {}", path.display()))?,
+    );
+    writeln!(out, "replay_id,slot,account")?;
+    for replay in pending {
+        for (slot, account) in replay.accounts.iter().enumerate() {
+            if let Some(account) = account {
+                // Ids are alphanumeric; quote anyway so a stray comma cannot shift columns.
+                writeln!(
+                    out,
+                    "{},{slot},\"{}\"",
+                    replay.replay_id,
+                    account.replace('"', "")
+                )?;
+            }
+        }
+    }
+    out.flush()?;
+    Ok(())
+}
+
 fn write_csv(path: &Path, rows: &[StatsRow], windowed: bool) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok();
@@ -240,12 +294,14 @@ async fn main() -> Result<()> {
                 continue;
             }
             let PendingSlots { roster, targets } = roster_and_targets(&players);
+            let accounts = account_ids(&replay.metadata, &roster);
             pending.push(PendingReplay {
                 replay_id: replay.id,
                 split,
                 file_path: replay.file_path,
                 roster,
                 targets,
+                accounts,
             });
         }
     }
@@ -276,6 +332,7 @@ async fn main() -> Result<()> {
         windows.extend(rows.windows);
     }
     write_csv(&args.match_out, &whole_match, false)?;
+    write_accounts_csv(&args.accounts_out, &pending)?;
     write_csv(&args.window_out, &windows, true)?;
     println!(
         "extract_stats: {} replays → {} match rows ({}), {} window rows ({})",
