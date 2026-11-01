@@ -1,7 +1,7 @@
 name: Release
 
-# Push a tag like `v1.2.0` to publish a GitHub Release with the web app build and the
-# model weights it embeds.
+# Push a tag like `v1.2.0` to publish a GitHub Release with the web app build, the model
+# weights it embeds and the database dump listing the replays it was trained on.
 on:
   push:
     tags: [ "v*" ]
@@ -57,4 +57,5 @@ jobs:
         gh release create "$GITHUB_REF_NAME" --generate-notes \
           is_this_a_smurf-web.zip \
           data/skill_model.bin \
+          data/database_dump.dump \
           docs/features.csv
