@@ -36,29 +36,13 @@ args = ["upgrade", "-i", "-v"]
 command = "cargo"
 args = ["update"]
 
+# `dx serve` also runs Tailwind (see Dioxus.toml), so Ctrl-C stops everything. Running the
+# Tailwind watcher as a second parallel task through npx.cmd left Windows' batch wrapper
+# waiting on "Terminate batch job (Y/N)?" after Ctrl-C.
 [tasks.start-web]
-cwd = "./crates/is_this_a_smurf"
-run_task = { name = ["start-web-tailwind", "start-web-dx"], parallel = true }
-
-[tasks.start-web-dx]
 cwd = "./crates/is_this_a_smurf"
 command = "dx"
 args = ["serve"]
-
-[tasks.start-web-tailwind]
-cwd = "./crates/is_this_a_smurf"
-command = "npx"
-args = [
-    "@tailwindcss/cli",
-    "-i",
-    "./input.css",
-    "-o",
-    "./assets/tailwind.css",
-    "--watch",
-]
-
-[tasks.start-web-tailwind.windows]
-command = "npx.cmd"
 
 # Build the web app for production (tailwind first, then dx release build → dist/).
 [tasks.build-web]

@@ -1,6 +1,10 @@
 [application]
 name = "is_this_a_smurf"
 default_platform = "web"
+# dx runs the Tailwind CLI itself (watch mode under `dx serve`), so the server is one
+# process that Ctrl-C stops.
+tailwind_input = "input.css"
+tailwind_output = "assets/tailwind.css"
 
 [web.app]
 title = "Is this a smurf?"

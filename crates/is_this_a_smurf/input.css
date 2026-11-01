@@ -1,7 +1,6 @@
 /* Tailwind v4: @source lists folders/files to scan for class names (see Dioxus guide).
-   Dioxus does not compile this file by itself — the Tailwind CLI emits ./assets/tailwind.css.
-   Development: npm run tailwind:watch (in this directory) alongside dx serve.
-   Release / CI: npm run tailwind:build before dx build so assets/tailwind.css is up to date.
+   Dioxus.toml points dx at this file: dx serve runs the Tailwind CLI in watch mode and
+   emits ./assets/tailwind.css. Release / CI: cargo make build-web (minified build first).
    https://dioxuslabs.com/learn/0.7/guides/utilities/tailwind */
 @import "tailwindcss";
 @source "./src/**/*.{rs,html,css}";
