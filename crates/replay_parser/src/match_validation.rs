@@ -34,17 +34,6 @@ pub fn validate_supported_match(replay: &Replay) -> Result<MatchFormat, Unsuppor
         });
     }
 
-    let team_size =
-        header_int_property(replay, "TeamSize").ok_or_else(|| UnsupportedReplayMatch {
-            detected_mode_label: "missing team size in replay header".to_string(),
-        })?;
-    if !(1..=MAXIMUM_PLAYERS_PER_TEAM).contains(&team_size) {
-        return Err(UnsupportedReplayMatch {
-            detected_mode_label: team_size_label(team_size),
-        });
-    }
-    let players_per_team = usize::try_from(team_size).unwrap_or(1);
-
     let ranked = match playlist_id_from_header(replay) {
         Some(
             RANKED_DUELS_PLAYLIST_ID
@@ -70,6 +59,17 @@ pub fn validate_supported_match(replay: &Replay) -> Result<MatchFormat, Unsuppor
             }
         },
     };
+
+    let team_size =
+        header_int_property(replay, "TeamSize").ok_or_else(|| UnsupportedReplayMatch {
+            detected_mode_label: "missing team size in replay header".to_string(),
+        })?;
+    if !(1..=MAXIMUM_PLAYERS_PER_TEAM).contains(&team_size) {
+        return Err(UnsupportedReplayMatch {
+            detected_mode_label: team_size_label(team_size),
+        });
+    }
+    let players_per_team = usize::try_from(team_size).unwrap_or(1);
 
     let player_count = effective_human_player_count(replay);
     let full_lobby = players_per_team * 2;
