@@ -24,7 +24,7 @@ use feature_extractor::{
 use replay_structs::{ParsedReplay, Team};
 
 use crate::SkillModelBundle;
-use crate::coaching::CoachingAdvice;
+use crate::coaching::{CoachingAdvice, smurf_line};
 use crate::mechanics::{MechanicEvidence, mechanics_above_lobby};
 use crate::smurf::{SmurfReason, smurf_suspicions};
 
@@ -61,7 +61,7 @@ pub struct MatchAnalysis {
     /// Per slot: the named mechanics done far more than the other players' tier, highest
     /// typical tier first.
     pub mechanics: [Vec<MechanicEvidence>; TOTAL_SLOTS],
-    /// Roast per slot.
+    /// Stat tip per slot; [`Self::roast`] replaces it with a smurf line for flagged slots.
     pub coaching: [Option<CoachingAdvice>; TOTAL_SLOTS],
     /// Timeline windows in order.
     pub timeline: Vec<PlayerTimeline>,
@@ -76,6 +76,20 @@ impl MatchAnalysis {
         } else {
             Team::Orange
         }
+    }
+
+    /// The roast shown for a slot, line `variant`: a smurf line for a flagged player (a
+    /// smurf gets no help), otherwise their stat tip.
+    #[must_use]
+    pub fn roast(&self, slot: usize, variant: usize) -> Option<String> {
+        let name = self.names.get(slot)?;
+        if self.smurf.get(slot)?.is_some() {
+            return Some(smurf_line(variant, name));
+        }
+        self.coaching
+            .get(slot)?
+            .as_ref()
+            .map(|advice| advice.line(variant, name))
     }
 }
 

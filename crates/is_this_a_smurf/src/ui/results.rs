@@ -254,11 +254,14 @@ fn TeamSummaryCard(
                                 p { class: "font-semibold text-gray-100 break-words",
                                     "{player.name}"
                                 }
-                                p { class: "text-sm text-gray-500", "{player.rank}" }
+                                // A smurf's lobby-anchored rank contradicts their icon and timeline,
+                                // so only the rank they play like is shown.
                                 if let Some(plays_like) = &player.plays_like {
                                     p { class: "text-sm font-semibold text-red-400",
                                         "Plays like {plays_like}"
                                     }
+                                } else {
+                                    p { class: "text-sm text-gray-500", "{player.rank}" }
                                 }
                                 if player.smurf == Some(skill_model::SmurfReason::DerankingAboveLobby) {
                                     p { class: "text-sm font-semibold text-red-400",

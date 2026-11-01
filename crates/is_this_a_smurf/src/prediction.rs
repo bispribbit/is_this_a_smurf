@@ -8,6 +8,7 @@
 use feature_extractor::TOTAL_SLOTS;
 use rand::{RngExt, rng};
 use replay_structs::{GameFrame, MatchFormat, ParsedReplay, RankDivision, Team};
+use skill_model::coaching::tier_index;
 use skill_model::mechanics::{MechanicEvidence, TIER_SINGULARS};
 use skill_model::{MatchAnalysis, PlayerTimeline, SmurfReason};
 
@@ -204,21 +205,54 @@ const MECHANICS_SHOWN: usize = 3;
 /// Mechanics an unflagged player must do far above the lobby before the card names them.
 const MECHANICS_FOR_UNFLAGGED: usize = 3;
 
-/// "Speed flips like a Champ I · flip resets like a GC I", or `None` when there is nothing
-/// worth showing.
-fn mechanics_line(evidence: &[MechanicEvidence], flagged: bool) -> Option<String> {
+/// Mechanics that share one comparison, e.g. "flip resets and dribbles" + "like a Diamond III".
+struct MechanicPhrase {
+    labels: Vec<&'static str>,
+    comparison: String,
+}
+
+/// "Speed flips like a Gold III · flip resets and dribbles like a Diamond III", or `None`
+/// when there is nothing worth showing.
+///
+/// Mechanics are compared with the rank the card shows (`evaluated_tier`), never above it:
+/// a player placed at Diamond III who flip-resets like an SSL reads "like a Diamond III", so
+/// the line agrees with the card instead of naming a rank they were never placed at.
+fn mechanics_line(
+    evidence: &[MechanicEvidence],
+    flagged: bool,
+    evaluated_tier: usize,
+) -> Option<String> {
     if evidence.is_empty() || (!flagged && evidence.len() < MECHANICS_FOR_UNFLAGGED) {
         return None;
     }
-    let parts: Vec<String> = evidence
+    let tier_name = |tier: usize| TIER_SINGULARS.get(tier).copied().unwrap_or("SSL");
+    let mut phrases: Vec<MechanicPhrase> = Vec::new();
+    for item in evidence.iter().take(MECHANICS_SHOWN) {
+        let comparison = format!(
+            "like a {}",
+            tier_name(item.typical_tier.min(evaluated_tier))
+        );
+        match phrases
+            .iter_mut()
+            .find(|phrase| phrase.comparison == comparison)
+        {
+            Some(phrase) => phrase.labels.push(item.mechanic.label),
+            None => phrases.push(MechanicPhrase {
+                labels: vec![item.mechanic.label],
+                comparison,
+            }),
+        }
+    }
+    let parts: Vec<String> = phrases
         .iter()
-        .take(MECHANICS_SHOWN)
-        .map(|item| {
-            let tier = TIER_SINGULARS
-                .get(item.typical_tier)
-                .copied()
-                .unwrap_or("SSL");
-            format!("{} like a {tier}", item.mechanic.label)
+        .map(|phrase| {
+            let labels = match phrase.labels.split_last() {
+                Some((last, rest)) if !rest.is_empty() => {
+                    format!("{} and {last}", rest.join(", "))
+                }
+                _ => phrase.labels.join(""),
+            };
+            format!("{labels} {}", phrase.comparison)
         })
         .collect();
     let line = parts.join(" · ");
@@ -237,26 +271,24 @@ pub(crate) fn build_prediction_results(
         .filter(|&slot| !analysis.names[slot].is_empty())
         .filter_map(|slot| {
             let mmr = analysis.match_mmr[slot]?;
+            let plays_like = analysis.plays_like_mmr[slot].filter(|_| {
+                matches!(
+                    analysis.smurf[slot],
+                    Some(SmurfReason::PlaysAboveLobby | SmurfReason::DerankingAboveLobby)
+                )
+            });
             Some(PlayerAverage {
                 name: analysis.names[slot].clone(),
                 team: MatchAnalysis::team(slot),
                 mmr,
                 rank: RankDivision::from(mmr),
-                next_rank_roast: analysis.coaching[slot].as_ref().map(|advice| {
-                    advice.line(random.random_range(0..usize::MAX), &analysis.names[slot])
-                }),
+                next_rank_roast: analysis.roast(slot, random.random_range(0..usize::MAX)),
                 smurf: analysis.smurf[slot],
-                plays_like: analysis.plays_like_mmr[slot]
-                    .filter(|_| {
-                        matches!(
-                            analysis.smurf[slot],
-                            Some(SmurfReason::PlaysAboveLobby | SmurfReason::DerankingAboveLobby)
-                        )
-                    })
-                    .map(RankDivision::from),
+                plays_like: plays_like.map(RankDivision::from),
                 mechanics: mechanics_line(
                     &analysis.mechanics[slot],
                     analysis.smurf[slot].is_some(),
+                    tier_index(plays_like.unwrap_or(mmr)),
                 ),
             })
         })

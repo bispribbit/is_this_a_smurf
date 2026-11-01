@@ -1,7 +1,7 @@
 //! One roast per player: what the next rank up does that you don't.
 //!
 //! Each player is compared with the **median player [`TARGET_TIER_STEP`] divisions above
-//! their predicted division** (Diamond I → Diamond III, Champion III → Grand Champion II) on
+//! their predicted division** (Diamond I → Diamond II, Champion III → Grand Champion I) on
 //! a curated list of stats that a person can act on. The stat with the largest shortfall,
 //! measured in that division's own spread, picks the line. Because the reference is always
 //! just above, a bronze is told to hit the ball forward and a champ to
@@ -21,10 +21,9 @@ mod lines;
 
 /// How many tiers above the player's predicted tier the comparison targets.
 ///
-/// Two divisions (Diamond I → Diamond III): from Diamond up a whole named rank is several
-/// hundred MMR, too far to be the next step, while the next division's median is only a few
-/// wins away from a player at the top of their own division.
-pub const TARGET_TIER_STEP: usize = 2;
+/// The next one (Diamond I → Diamond II): the roast is about the rank the card shows, so it
+/// names the step right above it rather than one the player was never placed near.
+pub const TARGET_TIER_STEP: usize = 1;
 
 /// How many tiers above the player's tier a stat must improve over to count.
 ///
@@ -222,6 +221,19 @@ pub const COACHING_TIPS: &[CoachingTip] = &[
 
 /// Lines for a player with nothing left to learn from the rank above (or already SSL).
 pub const NOTHING_TO_FIX_LINES: &[&str] = lines::NOTHING_TO_FIX;
+
+/// Lines for a flagged smurf, who gets a roast instead of a stat tip.
+pub const SMURF_LINES: &[&str] = lines::SMURF;
+
+/// Renders smurf line `variant` (wrapped to the available lines) about player `name`.
+#[must_use]
+pub fn smurf_line(variant: usize, name: &str) -> String {
+    SMURF_LINES
+        .get(variant % SMURF_LINES.len())
+        .copied()
+        .unwrap_or_default()
+        .replace(NAME_PLACEHOLDER, name)
+}
 
 /// Reference values of one tier for every tip, aligned with [`COACHING_TIPS`].
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -490,6 +502,7 @@ mod tests {
             );
         }
         assert!(NOTHING_TO_FIX_LINES.len() >= 20);
+        assert!(SMURF_LINES.len() >= 20);
     }
 
     /// Lines describe one of several players, so they never talk to the reader.
@@ -498,7 +511,8 @@ mod tests {
         let all_lines = COACHING_TIPS
             .iter()
             .flat_map(|tip| tip.lines.iter())
-            .chain(NOTHING_TO_FIX_LINES);
+            .chain(NOTHING_TO_FIX_LINES)
+            .chain(SMURF_LINES);
         for line in all_lines {
             let addresses_reader = ["{name}", "{yours}", "{theirs}", "{next}"]
                 .iter()
@@ -523,8 +537,8 @@ mod tests {
         stats[stat_column("high_air_fraction")] = 0.0;
         let bronze = table().advise(100.0, &stats).expect("table is not empty");
         assert_eq!(bronze.tip.map(|tip| tip.stat), Some("touches_per_minute"));
-        assert_eq!(bronze.next, "Bronze IIIs");
-        assert!(bronze.line(0, "Player").contains("Bronze IIIs"));
+        assert_eq!(bronze.next, "Bronze IIs");
+        assert!(bronze.line(0, "Player").contains("Bronze IIs"));
     }
 
     #[test]

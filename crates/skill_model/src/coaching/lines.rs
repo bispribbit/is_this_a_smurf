@@ -668,3 +668,29 @@ pub(super) const NOTHING_TO_FIX: &[&str] = &[
     "Nothing to roast. {name} is the roast.",
     "Spotless. Nobody likes a show-off, {name}.",
 ];
+
+/// Lines for a flagged smurf: no stat tip, just a roast.
+pub(super) const SMURF: &[&str] = &[
+    "No tips for {name}. The main account already knows them.",
+    "Coaching {name} would be like teaching a fish to swim. A fish on its second account.",
+    "{name} doesn't need a coach, {name} needs a lobby their own size.",
+    "Nothing to improve. Nothing to forgive either, {name}.",
+    "{name} plays this rank the way an adult plays musical chairs with toddlers.",
+    "The only stat {name} needs to work on is honesty.",
+    "{name} left the real rank at home and brought the mechanics anyway.",
+    "Tip for {name}: queue on the main. The lobby says thanks in advance.",
+    "{name}'s alt account is doing great. The opponents, less so.",
+    "{name} is here for the confidence boost, not the coaching.",
+    "Fresh account, old habits. Nice try, {name}.",
+    "{name} plays like they've seen this lobby from above. Because they have.",
+    "Somewhere {name}'s real rank is wondering where they went.",
+    "{name} could coach this lobby. Instead, {name} farms it.",
+    "Bold of {name} to wear that rank like it fits.",
+    "No advice for {name}. Just a report button.",
+    "{name} speedran the humility check and failed it.",
+    "{name}'s improvement plan: lose on purpose, win for fun.",
+    "The rank says one thing. {name}'s hands say another.",
+    "{name} isn't climbing, {name} is visiting.",
+    "Smurfing is a skill issue too, {name}. A character one.",
+    "{name} has the mechanics of a pro and the conscience of a raccoon.",
+];
