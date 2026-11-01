@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT COUNT(*) as \"count!\" FROM replays WHERE rank = $1",
+  "query": "SELECT COUNT(*) as \"count!\" FROM replays WHERE game_mode = $1 AND rank = $2",
   "describe": {
     "columns": [
       {
@@ -12,6 +12,38 @@
     ],
     "parameters": {
       "Left": [
+        {
+          "Custom": {
+            "name": "game_mode",
+            "kind": {
+              "Enum": [
+                "unranked_duels",
+                "unranked_doubles",
+                "unranked_standard",
+                "unranked_chaos",
+                "private",
+                "season",
+                "offline",
+                "ranked_duels",
+                "ranked_doubles",
+                "ranked_solo_standard",
+                "ranked_standard",
+                "snowday",
+                "rocketlabs",
+                "hoops",
+                "rumble",
+                "tournament",
+                "dropshot",
+                "ranked_hoops",
+                "ranked_rumble",
+                "ranked_dropshot",
+                "ranked_snowday",
+                "dropshot_rumble",
+                "heatseeker"
+              ]
+            }
+          }
+        },
         {
           "Custom": {
             "name": "rank",
@@ -51,5 +83,5 @@
       null
     ]
   },
-  "hash": "c201491abecb2eeac0387b0cc540f22e70b7676721e7e1fe495fb22a33945aeb"
+  "hash": "2058ca8d1859ed74864314e58179ec84f808f51f06331a71c10dd959d051466f"
 }

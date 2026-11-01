@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n                SELECT id, game_mode as \"game_mode: GameMode\", rank as \"rank: Rank\", metadata,\n                       download_status as \"download_status: DownloadStatus\", file_path, error_message,\n                       dataset_split as \"dataset_split: DatasetSplit\", created_at, updated_at\n                FROM replays\n                WHERE download_status = 'not_downloaded'\n                ORDER BY created_at\n                LIMIT $1\n                ",
+  "query": "\n                SELECT id, game_mode as \"game_mode: GameMode\", rank as \"rank: Rank\", metadata,\n                       download_status as \"download_status: DownloadStatus\", file_path, error_message,\n                       dataset_split as \"dataset_split: DatasetSplit\", created_at, updated_at\n                FROM (\n                    SELECT *, ROW_NUMBER() OVER (\n                        PARTITION BY game_mode, rank ORDER BY created_at\n                    ) AS bucket_position\n                    FROM replays\n                    WHERE download_status = 'not_downloaded'\n                ) pending\n                -- Round-robin over (playlist, rank) so a partial download stays balanced.\n                ORDER BY bucket_position, game_mode, rank\n                LIMIT $1\n                ",
   "describe": {
     "columns": [
       {
@@ -217,5 +217,5 @@
       false
     ]
   },
-  "hash": "c4cce88eda81672a18631c6b8a4aaa1bfa3864a4fde792ace1565fbdab309673"
+  "hash": "fdb25bc59c4a549954b8012680b75ae8b469d7e3188f27ff20e033a17ec5a752"
 }
