@@ -6,6 +6,9 @@
 
 use manganis::{Asset, AssetOptions, ImageFormat, ImageSize, asset};
 
+/// The project's source code, linked from every page.
+pub(crate) const REPOSITORY_URL: &str = "https://github.com/bispribbit/rocket_league_score";
+
 // Source asset is 1024×1536 (2:3 portrait). Encoding must keep the same aspect ratio or the
 // output looks stretched. 480×720 preserves 2:3.
 const HERO_WIDTH_PX: u32 = 480;

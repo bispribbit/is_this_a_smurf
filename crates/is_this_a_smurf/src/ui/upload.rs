@@ -58,7 +58,7 @@ pub(crate) fn UploadPage(
         return rsx! {
             div { class: "flex flex-col min-h-screen w-full bg-gray-950 text-gray-100",
                 div { class: "max-w-7xl mx-auto px-4 py-8 w-full flex flex-col gap-8",
-                    div { class: "flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4",
+                    div { class: "flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 pr-10",
                         div {
                             h1 { class: "text-3xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-orange-400",
                                 "Is there a smurf in this match?"

@@ -27,6 +27,7 @@ use crate::plays_like::{PlaysLikeGroup, PlaysLikeGroups};
 const MAGIC: &[u8; 8] = b"RLSKILL5";
 
 /// Largest quantised leaf magnitude.
+#[cfg(feature = "encode")]
 const LEAF_STEPS: f32 = 32767.0;
 
 /// Everything the app needs, in one artifact.

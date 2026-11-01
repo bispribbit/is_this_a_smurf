@@ -1,0 +1,60 @@
+name: Release
+
+# Push a tag like `v1.2.0` to publish a GitHub Release with the web app build and the
+# model weights it embeds.
+on:
+  push:
+    tags: [ "v*" ]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v7
+    - uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: 1.99.0
+        targets: wasm32-unknown-unknown
+
+    - name: Rust Cache
+      uses: Swatinem/rust-cache@v2
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v7
+      with:
+        node-version: 'lts/*'
+
+    - name: Install the Dioxus CLI
+      uses: cargo-bins/cargo-binstall@main
+    - run: cargo binstall -y dioxus-cli@0.7.10
+
+    - name: Build Tailwind CSS
+      working-directory: crates/is_this_a_smurf
+      run: |
+        npm ci
+        npm run tailwind:build
+
+    - name: Build the web app
+      working-directory: crates/is_this_a_smurf
+      run: dx build --platform web --release
+
+    - name: Package
+      run: |
+        cd target/dx/is_this_a_smurf/release/web
+        zip -r "$GITHUB_WORKSPACE/is_this_a_smurf-web.zip" public
+
+    - name: Publish the release
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        gh release create "$GITHUB_REF_NAME" --generate-notes \
+          is_this_a_smurf-web.zip \
+          data/skill_model.bin \
+          docs/features.csv

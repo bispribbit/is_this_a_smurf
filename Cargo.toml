@@ -78,7 +78,8 @@ inherits = "release"
 opt-level = "s"
 lto = true
 codegen-units = 1
-strip = true
+# Not `true`: on wasm that also strips the custom section wasm-bindgen reads.
+strip = "debuginfo"
 panic = "abort"
 
 [workspace.lints.rust]
