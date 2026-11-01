@@ -1,5 +1,41 @@
 //! Which kind of soccar match a replay is: team size and whether it was ranked.
 
+use strum::IntoEnumIterator;
+
+/// The soccar team sizes the models serve, one playlist each.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, strum::EnumIter, strum::Display, strum::IntoStaticStr,
+)]
+#[strum(serialize_all = "lowercase")]
+pub enum TeamSize {
+    Duels,
+    Doubles,
+    Standard,
+}
+
+impl TeamSize {
+    /// Players per team: 1, 2 or 3.
+    #[must_use]
+    pub const fn players_per_team(self) -> usize {
+        match self {
+            Self::Duels => 1,
+            Self::Doubles => 2,
+            Self::Standard => 3,
+        }
+    }
+
+    /// Lowercase playlist name: "duels", "doubles" or "standard".
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        self.into()
+    }
+
+    /// Every team size, duels first.
+    pub fn all() -> impl Iterator<Item = Self> {
+        Self::iter()
+    }
+}
+
 /// Team size and queue of a supported replay.
 ///
 /// The app always predicts the **competitive** rank for the team size, also for casual

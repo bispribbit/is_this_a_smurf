@@ -14,7 +14,7 @@
 //! The reference table ([`CoachingTable`]) is built from training data by the exporter and
 //! shipped inside the model bundle.
 
-use feature_extractor::MATCH_STAT_NAMES;
+use feature_extractor::MatchStat;
 use serde::{Deserialize, Serialize};
 
 mod lines;
@@ -94,8 +94,7 @@ const NAME_PLACEHOLDER: &str = "{name}";
 /// "Gold IIs").
 #[derive(Debug, Clone, Copy)]
 pub struct CoachingTip {
-    /// Stat name in [`MATCH_STAT_NAMES`].
-    pub stat: &'static str,
+    pub stat: MatchStat,
     pub better: Better,
     pub unit: Unit,
     pub lines: &'static [&'static str],
@@ -104,118 +103,124 @@ pub struct CoachingTip {
 /// The curated, actionable stats. Order is the table's column order.
 pub const COACHING_TIPS: &[CoachingTip] = &[
     CoachingTip {
-        stat: "touches_per_minute",
+        stat: MatchStat::TouchesPerMinute,
         better: Better::Higher,
         unit: Unit::PerMinute,
         lines: lines::TOUCHES_PER_MINUTE,
     },
     CoachingTip {
-        stat: "forward_touch_fraction",
+        stat: MatchStat::ForwardTouchFraction,
         better: Better::Higher,
         unit: Unit::Percent,
         lines: lines::FORWARD_TOUCH_FRACTION,
     },
     CoachingTip {
-        stat: "mean_ball_speed_after_touch",
+        stat: MatchStat::MeanBallSpeedAfterTouch,
         better: Better::Higher,
         unit: Unit::BallSpeed,
         lines: lines::MEAN_BALL_SPEED_AFTER_TOUCH,
     },
     CoachingTip {
-        stat: "boost_empty_fraction",
+        stat: MatchStat::BoostEmptyFraction,
         better: Better::Lower,
         unit: Unit::Percent,
         lines: lines::BOOST_EMPTY_FRACTION,
     },
     CoachingTip {
-        stat: "small_pads_per_minute",
+        stat: MatchStat::SmallPadsPerMinute,
         better: Better::Higher,
         unit: Unit::PerMinute,
         lines: lines::SMALL_PADS_PER_MINUTE,
     },
     CoachingTip {
-        stat: "supersonic_fraction",
+        stat: MatchStat::SupersonicFraction,
         better: Better::Higher,
         unit: Unit::Percent,
         lines: lines::SUPERSONIC_FRACTION,
     },
     CoachingTip {
-        stat: "slow_fraction",
+        stat: MatchStat::SlowFraction,
         better: Better::Lower,
         unit: Unit::Percent,
         lines: lines::SLOW_FRACTION,
     },
     CoachingTip {
-        stat: "overcommit_fraction",
+        stat: MatchStat::OvercommitFraction,
         better: Better::Lower,
         unit: Unit::Percent,
         lines: lines::OVERCOMMIT_FRACTION,
     },
     CoachingTip {
-        stat: "goal_side_when_defending_fraction",
+        stat: MatchStat::GoalSideWhenDefendingFraction,
         better: Better::Higher,
         unit: Unit::Percent,
         lines: lines::GOAL_SIDE_WHEN_DEFENDING_FRACTION,
     },
     CoachingTip {
-        stat: "double_commit_fraction",
+        stat: MatchStat::DoubleCommitFraction,
         better: Better::Lower,
         unit: Unit::Percent,
         lines: lines::DOUBLE_COMMIT_FRACTION,
     },
     CoachingTip {
-        stat: "goal_side_after_touch_fraction",
+        stat: MatchStat::GoalSideAfterTouchFraction,
         better: Better::Higher,
         unit: Unit::Percent,
         lines: lines::GOAL_SIDE_AFTER_TOUCH_FRACTION,
     },
     CoachingTip {
-        stat: "kickoff_win_fraction",
+        stat: MatchStat::KickoffWinFraction,
         better: Better::Higher,
         unit: Unit::Percent,
         lines: lines::KICKOFF_WIN_FRACTION,
     },
     CoachingTip {
-        stat: "demos_received",
+        stat: MatchStat::DemosReceived,
         better: Better::Lower,
         unit: Unit::Count,
         lines: lines::DEMOS_RECEIVED,
     },
     CoachingTip {
-        stat: "dodges_per_minute",
+        stat: MatchStat::DodgesPerMinute,
         better: Better::Higher,
         unit: Unit::PerMinute,
         lines: lines::DODGES_PER_MINUTE,
     },
     CoachingTip {
-        stat: "high_air_fraction",
+        stat: MatchStat::HighAirFraction,
         better: Better::Higher,
         unit: Unit::Percent,
         lines: lines::HIGH_AIR_FRACTION,
     },
     CoachingTip {
-        stat: "aerial_touch_fraction",
+        stat: MatchStat::AerialTouchFraction,
         better: Better::Higher,
         unit: Unit::Percent,
         lines: lines::AERIAL_TOUCH_FRACTION,
     },
     CoachingTip {
-        stat: "fast_aerial_fraction",
+        stat: MatchStat::FastAerialFraction,
         better: Better::Higher,
         unit: Unit::Percent,
         lines: lines::FAST_AERIAL_FRACTION,
     },
     CoachingTip {
-        stat: "wavedash_like_dodges_per_minute",
+        stat: MatchStat::WavedashLikeDodgesPerMinute,
         better: Better::Higher,
         unit: Unit::PerMinute,
         lines: lines::WAVEDASH_LIKE_DODGES_PER_MINUTE,
     },
     CoachingTip {
-        stat: "powerslide_fraction",
+        stat: MatchStat::PowerslideFraction,
         better: Better::Higher,
         unit: Unit::Percent,
         lines: lines::POWERSLIDE_FRACTION,
+    },
+    CoachingTip {
+        stat: MatchStat::CleanLandingFraction,
+        better: Better::Higher,
+        unit: Unit::Percent,
+        lines: lines::CLEAN_LANDING_FRACTION,
     },
 ];
 
@@ -275,32 +280,6 @@ impl CoachingTables {
     }
 }
 
-/// Plural display name per tier index (0 = Bronze I … 21 = SSL), as used in `{next}`.
-const TIER_PLURALS: [&str; 22] = [
-    "Bronze Is",
-    "Bronze IIs",
-    "Bronze IIIs",
-    "Silver Is",
-    "Silver IIs",
-    "Silver IIIs",
-    "Gold Is",
-    "Gold IIs",
-    "Gold IIIs",
-    "Platinum Is",
-    "Platinum IIs",
-    "Platinum IIIs",
-    "Diamond Is",
-    "Diamond IIs",
-    "Diamond IIIs",
-    "Champ Is",
-    "Champ IIs",
-    "Champ IIIs",
-    "GC Is",
-    "GC IIs",
-    "GC IIIs",
-    "SSLs",
-];
-
 /// Tier index (0 = Bronze I … 21 = SSL) for an MMR value.
 #[must_use]
 pub fn tier_index(mmr: f32) -> usize {
@@ -357,7 +336,7 @@ impl CoachingTable {
         let last = self.tiers.len().checked_sub(1)?;
         let current = tier_index(predicted_mmr).min(last);
         let target = (current + TARGET_TIER_STEP).min(last);
-        let next = TIER_PLURALS.get(target).copied().unwrap_or("SSLs");
+        let next = replay_structs::Rank::from_tier_index(target).plural_name();
         let nothing = CoachingAdvice {
             tip: None,
             yours: 0.0,
@@ -379,11 +358,7 @@ impl CoachingTable {
             if !self.enabled.get(tip_index).copied().unwrap_or(false) {
                 continue;
             }
-            let Some(stat_index) = MATCH_STAT_NAMES.iter().position(|name| *name == tip.stat)
-            else {
-                continue;
-            };
-            let Some(&yours) = stats.get(stat_index) else {
+            let Some(&yours) = stats.get(tip.stat.index()) else {
                 continue;
             };
             let Some(&theirs) = target_reference.medians.get(tip_index) else {
@@ -434,17 +409,10 @@ impl CoachingTable {
 mod tests {
     use super::*;
 
-    fn stat_column(name: &str) -> usize {
-        MATCH_STAT_NAMES
-            .iter()
-            .position(|stat| *stat == name)
-            .unwrap_or(usize::MAX)
-    }
-
-    fn tip_column(name: &str) -> usize {
+    fn tip_column(stat: MatchStat) -> usize {
         COACHING_TIPS
             .iter()
-            .position(|tip| tip.stat == name)
+            .position(|tip| tip.stat == stat)
             .unwrap_or(usize::MAX)
     }
 
@@ -455,8 +423,8 @@ mod tests {
             .map(|tier| {
                 let mut medians = vec![0.5; COACHING_TIPS.len()];
                 let spreads = vec![0.1; COACHING_TIPS.len()];
-                medians[tip_column("touches_per_minute")] = 1.0f32.mul_add(tier as f32, 2.0);
-                medians[tip_column("high_air_fraction")] = if tier < 6 {
+                medians[tip_column(MatchStat::TouchesPerMinute)] = 1.0f32.mul_add(tier as f32, 2.0);
+                medians[tip_column(MatchStat::HighAirFraction)] = if tier < 6 {
                     0.5
                 } else {
                     0.1f32.mul_add((tier - 6) as f32, 0.5)
@@ -467,18 +435,6 @@ mod tests {
         CoachingTable {
             tiers,
             enabled: vec![true; COACHING_TIPS.len()],
-        }
-    }
-
-    #[test]
-    fn every_tip_names_a_real_stat() {
-        for tip in COACHING_TIPS {
-            assert!(
-                MATCH_STAT_NAMES.contains(&tip.stat),
-                "{} is not a match stat",
-                tip.stat
-            );
-            assert!(!tip.lines.is_empty(), "{} has no lines", tip.stat);
         }
     }
 
@@ -532,18 +488,21 @@ mod tests {
     /// not separate their tier from the target tier, however far behind they are.
     #[test]
     fn advice_targets_what_separates_the_next_rank() {
-        let mut stats = vec![0.5; MATCH_STAT_NAMES.len()];
-        stats[stat_column("touches_per_minute")] = 1.0;
-        stats[stat_column("high_air_fraction")] = 0.0;
+        let mut stats = vec![0.5; feature_extractor::MATCH_STAT_COUNT];
+        stats[MatchStat::TouchesPerMinute.index()] = 1.0;
+        stats[MatchStat::HighAirFraction.index()] = 0.0;
         let bronze = table().advise(100.0, &stats).expect("table is not empty");
-        assert_eq!(bronze.tip.map(|tip| tip.stat), Some("touches_per_minute"));
+        assert_eq!(
+            bronze.tip.map(|tip| tip.stat),
+            Some(MatchStat::TouchesPerMinute)
+        );
         assert_eq!(bronze.next, "Bronze IIs");
         assert!(bronze.line(0, "Player").contains("Bronze IIs"));
     }
 
     #[test]
     fn nothing_to_fix_when_ahead_of_the_next_rank() {
-        let stats = vec![10.0; MATCH_STAT_NAMES.len()];
+        let stats = vec![10.0; feature_extractor::MATCH_STAT_COUNT];
         let advice = table().advise(100.0, &stats).expect("table is not empty");
         assert!(advice.tip.is_none());
         assert!(NOTHING_TO_FIX_LINES.contains(&advice.line(0, "Player").as_str()));

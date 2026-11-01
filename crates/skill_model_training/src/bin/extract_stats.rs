@@ -19,7 +19,7 @@ use database::{
     assign_dataset_splits, initialize_pool, list_replay_players_by_replay, list_replays_by_split,
 };
 use feature_extractor::{
-    MATCH_STAT_NAMES, PlayerMatchStats, PlayerRoster, SLOTS_PER_TEAM, TOTAL_SLOTS,
+    MatchStat, PlayerMatchStats, PlayerRoster, SLOTS_PER_TEAM, TOTAL_SLOTS,
     compute_player_match_stats, compute_player_window_stats, time_windows,
 };
 use rayon::prelude::*;
@@ -229,8 +229,8 @@ fn write_csv(path: &Path, rows: &[StatsRow], windowed: bool) -> Result<()> {
         std::fs::File::create(path).with_context(|| format!("creating {}", path.display()))?,
     );
     write!(out, "replay_id,split,slot,target_mmr,live_seconds")?;
-    for name in MATCH_STAT_NAMES {
-        write!(out, ",{name}")?;
+    for stat in MatchStat::all() {
+        write!(out, ",{stat}")?;
     }
     if windowed {
         write!(out, ",window_index")?;

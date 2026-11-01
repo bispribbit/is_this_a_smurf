@@ -635,6 +635,31 @@ pub(super) const POWERSLIDE_FRACTION: &[&str] = &[
     "{name} powerslides {yours}. {next}: {theirs}. The ball changed direction; {name} changed postcodes.",
 ];
 
+pub(super) const CLEAN_LANDING_FRACTION: &[&str] = &[
+    "{name} landed on the wheels {yours} of the time. {next}: {theirs}. The rest was turtle practice.",
+    "Clean landings: {yours}. {next}: {theirs}. {name} comes down like a dropped toast, roof side first.",
+    "{next} land on four wheels {theirs} of the time. {name}: {yours}. The roof is not a landing gear.",
+    "{yours} wheels-down landings. {next}: {theirs}. {name} spends half the match as a turtle.",
+    "{name} lands upright {yours} of the time, {next} {theirs}. Gravity wins, style loses.",
+    "{yours} clean landings. {next}: {theirs}. {name}'s car has wheels on one side only, and it's never that one.",
+    "{next}: {theirs} clean landings. {name}: {yours}. Every jump ends in a yard sale.",
+    "Landed on the wheels {yours} of the time ({next}: {theirs}). {name} lands like a cat thrown by a dog.",
+    "{yours}. {next}: {theirs}. {name} treats every landing as a surprise.",
+    "{name}'s landings: {yours} on the wheels. {next}: {theirs}. The other team scores during the recovery.",
+    "{next} come down on four wheels {theirs} of the time. {name}: {yours}. Belly up, again.",
+    "{yours} wheels-down. {next}: {theirs}. {name} recovers like a beetle on its back.",
+    "Clean landing rate {yours}, {next} {theirs}. {name}'s car spends more time on its roof than in the play.",
+    "{name} landed clean {yours} of the time. {next}: {theirs}. The air roll button exists for exactly this.",
+    "{yours} of landings on the wheels. {next}: {theirs}. {name} comes down sideways and wonders why the ball left.",
+    "{next} land upright {theirs}. {name}: {yours}. A tumble dryer has better orientation.",
+    "{yours} clean landings vs {theirs} for {next}. {name} jumps, then improvises.",
+    "{name}: {yours} on the wheels. {next}: {theirs}. Every landing comes with a free sightseeing tour of the ceiling.",
+    "{yours}. {next}: {theirs}. {name} lands like a shopping trolley pushed down the stairs.",
+    "Wheels-down landings {yours}. {next}: {theirs}. {name} flips the car more often than the ball.",
+    "{next} stick the landing {theirs} of the time. {name}: {yours}. The judges give it a zero.",
+    "{yours} clean. {next}: {theirs}. {name}'s car spends its landings looking at the sky.",
+];
+
 /// Lines for a player with nothing left to learn from the rank above (or already SSL).
 pub(super) const NOTHING_TO_FIX: &[&str] = &[
     "Honestly? Nothing to fix. Suspicious.",

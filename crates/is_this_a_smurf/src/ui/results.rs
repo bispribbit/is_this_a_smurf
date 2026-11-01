@@ -75,15 +75,13 @@ pub(crate) fn PlayerSummaryGrid(results: PredictionResults) -> Element {
         p { class: "text-center text-sm text-gray-400 mb-3", "{format_note}" }
         div { class: "grid grid-cols-1 md:grid-cols-2 gap-6 mb-10",
             TeamSummaryCard {
-                team_name: "Blue Team",
-                team_color: "blue",
+                team: Team::Blue,
                 loading: false,
                 players_complete: blue_players,
                 player_names_loading: vec![],
             }
             TeamSummaryCard {
-                team_name: "Orange Team",
-                team_color: "orange",
+                team: Team::Orange,
                 loading: false,
                 players_complete: orange_players,
                 player_names_loading: vec![],
@@ -119,15 +117,13 @@ pub(crate) fn PlayerSummaryGridLoading(progress: ProgressState) -> Element {
         return rsx! {
             div { class: "grid grid-cols-1 md:grid-cols-2 gap-6 mb-10",
                 TeamSummaryCard {
-                    team_name: "Blue Team",
-                    team_color: "blue",
+                    team: Team::Blue,
                     loading: true,
                     players_complete: vec![],
                     player_names_loading: vec![],
                 }
                 TeamSummaryCard {
-                    team_name: "Orange Team",
-                    team_color: "orange",
+                    team: Team::Orange,
                     loading: true,
                     players_complete: vec![],
                     player_names_loading: vec![],
@@ -158,15 +154,13 @@ pub(crate) fn PlayerSummaryGridLoading(progress: ProgressState) -> Element {
     rsx! {
         div { class: "grid grid-cols-1 md:grid-cols-2 gap-6 mb-10",
             TeamSummaryCard {
-                team_name: "Blue Team",
-                team_color: "blue",
+                team: Team::Blue,
                 loading: true,
                 players_complete: vec![],
                 player_names_loading: blue_names,
             }
             TeamSummaryCard {
-                team_name: "Orange Team",
-                team_color: "orange",
+                team: Team::Orange,
                 loading: true,
                 players_complete: vec![],
                 player_names_loading: orange_names,
@@ -197,34 +191,30 @@ fn LobbyAlertTriangleIcon() -> Element {
 /// Card showing team summary with player rank icons and rank names.
 #[component]
 fn TeamSummaryCard(
-    team_name: String,
-    team_color: String,
+    team: Team,
     loading: bool,
     players_complete: Vec<PlayerAverage>,
     player_names_loading: Vec<String>,
 ) -> Element {
     let roast_label = predicted_rank_roast_label();
-    let border_color = if team_color == "blue" {
-        "border-blue-500/50"
-    } else {
-        "border-orange-500/50"
+    let border_color = match team {
+        Team::Blue => "border-blue-500/50",
+        Team::Orange => "border-orange-500/50",
     };
-    let header_gradient = if team_color == "blue" {
-        "from-blue-500/20 to-transparent"
-    } else {
-        "from-orange-500/20 to-transparent"
+    let header_gradient = match team {
+        Team::Blue => "from-blue-500/20 to-transparent",
+        Team::Orange => "from-orange-500/20 to-transparent",
     };
-    let text_accent = if team_color == "blue" {
-        "text-blue-400"
-    } else {
-        "text-orange-400"
+    let text_accent = match team {
+        Team::Blue => "text-blue-400",
+        Team::Orange => "text-orange-400",
     };
 
     rsx! {
         div { class: "bg-gray-900 rounded-xl border {border_color} overflow-hidden",
             div { class: "bg-gradient-to-r {header_gradient} px-6 py-4",
                 div { class: "flex items-center justify-between gap-3",
-                    h2 { class: "text-xl font-bold {text_accent}", "{team_name}" }
+                    h2 { class: "text-xl font-bold {text_accent}", "{team} Team" }
                     if loading {
                         span { class: "text-gray-500 text-sm font-medium", "Calculating…" }
                     } else {

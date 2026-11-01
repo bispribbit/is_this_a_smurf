@@ -19,6 +19,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use replay_structs::Rank;
 use skill_model::coaching::tier_index;
 use skill_model::mechanics::mechanics_above_lobby;
 use skill_model::{SkillModelBundle, SmurfReason, smurf_suspicions};
@@ -43,12 +44,6 @@ struct Args {
     #[arg(long, default_value_t = 15)]
     count: usize,
 }
-
-/// Rank names by tier index.
-const TIER_NAMES: [&str; 22] = [
-    "B1", "B2", "B3", "S1", "S2", "S3", "G1", "G2", "G3", "P1", "P2", "P3", "D1", "D2", "D3", "C1",
-    "C2", "C3", "GC1", "GC2", "GC3", "SSL",
-];
 
 /// One flagged player.
 struct FlaggedPlayer {
@@ -76,7 +71,7 @@ impl FlaggedPlayer {
 
 fn tier_name(mmr: f32) -> &'static str {
     if mmr > 0.0 {
-        TIER_NAMES[tier_index(mmr)]
+        Rank::from_tier_index(tier_index(mmr)).short_name()
     } else {
         "?"
     }

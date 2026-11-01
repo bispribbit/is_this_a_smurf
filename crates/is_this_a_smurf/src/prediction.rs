@@ -7,9 +7,9 @@
 
 use feature_extractor::TOTAL_SLOTS;
 use rand::{RngExt, rng};
-use replay_structs::{GameFrame, MatchFormat, ParsedReplay, RankDivision, Team};
+use replay_structs::{GameFrame, MatchFormat, ParsedReplay, Rank, RankDivision, Team};
 use skill_model::coaching::tier_index;
-use skill_model::mechanics::{MechanicEvidence, TIER_SINGULARS};
+use skill_model::mechanics::MechanicEvidence;
 use skill_model::{MatchAnalysis, PlayerTimeline, SmurfReason};
 
 use crate::app_state::{
@@ -225,7 +225,7 @@ fn mechanics_line(
     if evidence.is_empty() || (!flagged && evidence.len() < MECHANICS_FOR_UNFLAGGED) {
         return None;
     }
-    let tier_name = |tier: usize| TIER_SINGULARS.get(tier).copied().unwrap_or("SSL");
+    let tier_name = |tier: usize| Rank::from_tier_index(tier).display_name();
     let mut phrases: Vec<MechanicPhrase> = Vec::new();
     for item in evidence.iter().take(MECHANICS_SHOWN) {
         let comparison = format!(

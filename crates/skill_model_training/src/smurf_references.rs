@@ -14,17 +14,11 @@
 //! A rule that picks training labels or flags players can no longer grade them, so an
 //! experiment using one keeps the other as its yardstick.
 
-use feature_extractor::{MATCH_STAT_NAMES, SLOTS_PER_TEAM};
+use feature_extractor::{MatchStat, SLOTS_PER_TEAM};
 use skill_model::coaching::tier_index;
 
 use crate::dataset::{Lobby, Partition};
 use crate::label_cleaning::SlotScores;
-
-/// Rank names by tier index.
-pub const TIER_NAMES: [&str; 22] = [
-    "B1", "B2", "B3", "S1", "S2", "S3", "G1", "G2", "G3", "P1", "P2", "P3", "D1", "D2", "D3", "C1",
-    "C2", "C3", "GC1", "GC2", "GC3", "SSL",
-];
 
 /// Highest tier a mechanical or dominant smurf can be labelled with (Gold II).
 pub const OBVIOUS_MAXIMUM_TIER: usize = 7;
@@ -33,13 +27,13 @@ pub const OBVIOUS_MAXIMUM_TIER: usize = 7;
 pub const OBVIOUS_REFERENCE_TIER: usize = 15;
 
 /// Aerial mechanics compared with the reference tier.
-pub const MECHANIC_STATS: [&str; 6] = [
-    "fast_aerial_fraction",
-    "air_roll_fraction",
-    "aerial_touch_fraction",
-    "high_air_fraction",
-    "aerial_dodges_per_minute",
-    "wavedash_like_dodges_per_minute",
+pub const MECHANIC_STATS: [MatchStat; 6] = [
+    MatchStat::FastAerialFraction,
+    MatchStat::AirRollFraction,
+    MatchStat::AerialTouchFraction,
+    MatchStat::HighAirFraction,
+    MatchStat::AerialDodgesPerMinute,
+    MatchStat::WavedashLikeDodgesPerMinute,
 ];
 
 /// How many of [`MECHANIC_STATS`] must reach the reference tier's median.
@@ -53,13 +47,6 @@ pub const DOMINANT_GOAL_DIFFERENCE: f32 = 3.0;
 
 /// Labels at or above this tier (Diamond I) make a flag most likely wrong.
 pub const HIGH_RANK_TIER: usize = 12;
-
-pub fn stat_index(name: &str) -> usize {
-    MATCH_STAT_NAMES
-        .iter()
-        .position(|stat| *stat == name)
-        .unwrap_or(usize::MAX)
-}
 
 /// Scores as tier indices, so a margin means the same number of divisions at every rank.
 pub fn as_tiers(scores: SlotScores) -> SlotScores {
@@ -81,7 +68,7 @@ pub fn median(values: &mut [f32]) -> f32 {
 /// Median of each mechanic stat among training players labelled with the reference tier.
 pub fn reference_mechanics(lobbies: &[Lobby]) -> [f32; MECHANIC_STATS.len()] {
     core::array::from_fn(|index| {
-        let stat = stat_index(MECHANIC_STATS[index]);
+        let stat = MECHANIC_STATS[index].index();
         let mut values: Vec<f32> = lobbies
             .iter()
             .filter(|lobby| lobby.partition != Partition::Evaluation)
@@ -97,7 +84,7 @@ pub fn reference_mechanics(lobbies: &[Lobby]) -> [f32; MECHANIC_STATS.len()] {
 }
 
 pub fn team_goal_difference(lobby: &Lobby, slot: usize) -> f32 {
-    let goals = stat_index("goals");
+    let goals = MatchStat::Goals.index();
     let team = usize::from(slot >= SLOTS_PER_TEAM);
     let mut team_goals = [0.0f32; 2];
     for (other, stats) in lobby.stats.iter().enumerate() {
@@ -124,7 +111,7 @@ pub fn is_mechanical_smurf(
     let at_reference = MECHANIC_STATS
         .iter()
         .zip(reference)
-        .filter(|(name, median)| **median > 0.0 && stats[stat_index(name)] >= **median)
+        .filter(|(stat, median)| **median > 0.0 && stats[stat.index()] >= **median)
         .count();
     at_reference >= MINIMUM_MECHANICS_AT_REFERENCE
         && team_goal_difference(lobby, slot) >= MINIMUM_GOAL_DIFFERENCE
@@ -137,8 +124,8 @@ pub fn is_dominant_smurf(lobby: &Lobby, slot: usize) -> bool {
     if label <= 0.0 || tier_index(label) > OBVIOUS_MAXIMUM_TIER {
         return false;
     }
-    let leads = |name: &str| {
-        let stat = stat_index(name);
+    let leads = |stat: MatchStat| {
+        let stat = stat.index();
         let own = lobby.stats[slot].map_or(f32::NEG_INFINITY, |stats| stats[stat]);
         lobby
             .stats
@@ -149,6 +136,6 @@ pub fn is_dominant_smurf(lobby: &Lobby, slot: usize) -> bool {
             .all(|value| own > value)
     };
     team_goal_difference(lobby, slot) >= DOMINANT_GOAL_DIFFERENCE
-        && leads("possession_fraction")
-        && leads("touches_per_minute")
+        && leads(MatchStat::PossessionFraction)
+        && leads(MatchStat::TouchesPerMinute)
 }

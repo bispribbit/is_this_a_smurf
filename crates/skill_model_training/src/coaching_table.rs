@@ -60,14 +60,7 @@ pub fn build_coaching_tables(lobbies: &[Lobby]) -> CoachingTables {
 /// evaluation split, so the roast is scored on data it was not built from).
 #[must_use]
 pub fn build_coaching_table(lobbies: &[&Lobby]) -> CoachingTable {
-    let stat_columns: Vec<Option<usize>> = COACHING_TIPS
-        .iter()
-        .map(|tip| {
-            feature_extractor::MATCH_STAT_NAMES
-                .iter()
-                .position(|name| *name == tip.stat)
-        })
-        .collect();
+    let stat_columns: Vec<usize> = COACHING_TIPS.iter().map(|tip| tip.stat.index()).collect();
 
     // values[tier][tip] = every labelled player's value of that tip's stat.
     let mut values: Vec<Vec<Vec<f32>>> = vec![vec![Vec::new(); COACHING_TIPS.len()]; TIER_COUNT];
@@ -86,7 +79,7 @@ pub fn build_coaching_table(lobbies: &[&Lobby]) -> CoachingTable {
                 continue;
             };
             for (tip_values, column) in tier_values.iter_mut().zip(&stat_columns) {
-                if let Some(value) = column.and_then(|column| stats.get(column)) {
+                if let Some(value) = stats.get(*column) {
                     tip_values.push(*value);
                 }
             }

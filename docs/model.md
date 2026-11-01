@@ -13,14 +13,14 @@ One file, `data/skill_model.bin` (~2.4 MB, see [Bundle format](#bundle-format)),
 | **Plays-like models** | each player's own stats, one model per stat group (aerial, ground, speed and boost, named mechanics) | the rank they play like | smurf badge, verdict |
 | **Mechanics table** | per-rank 95th percentiles of 11 named mechanics | the mechanics a player does far above their lobby | smurf badge, card |
 | **Window model** | the same stats over 60 s of live play | one MMR per player per minute | the timeline |
-| **Coaching table** | per-rank medians of 19 actionable stats | one roast per player | the line under each card |
+| **Coaching table** | per-rank medians of 20 actionable stats | one roast per player | the line under each card |
 
 Everything runs in the browser in a fraction of a second; there is no neural network.
 
 ### 1. Per-player stats (`crates/feature_extractor`)
 
 `compute_player_match_stats` reads every live frame (goal replays skipped) and summarises each
-player in **91 numbers**, all measured from that player's own side of the field, plus the
+player in **94 numbers**, all measured from that player's own side of the field, plus the
 playlist's team size (`players_per_team`, see [Playlists](#playlists)):
 
 - **movement** — speed, supersonic / slow time, ground / air / wall time, jumps
@@ -28,9 +28,13 @@ playlist's team size (`players_per_team`, see [Playlists](#playlists)):
 - **positioning** — field thirds, last back, behind the ball, distance to ball / teammates / goal
 - **ball** — possession, touches per minute, ball speed after a touch, aerial and forward touches
 - **mechanics** (from controller inputs) — flips, wavedash-like and aerial flips, flip
-  direction, fast aerials, powerslide, air roll, air control
+  direction, fast aerials, powerslide, air roll, air control, and clean landings (the share
+  of landings after half a second or more in the air that come down on the four wheels
+  rather than the roof or side) and the momentum kept through them (horizontal speed 0.4 s
+  after landing over the speed at touchdown)
 - **scoreboard** — in-game score, assists, saves, shots
-- **named mechanics** — speed flips, half flips, wavedashes, flip resets, ceiling touches,
+- **named mechanics** — speed flips, half flips, wavedashes, tornado spins (half a second of
+  fast, boosting air roll with the nose held steady), flip resets, ceiling touches,
   dribbles and flicks, air dribbles, double taps, wall and flip touches, power shots,
   50/50s and their win rate, bumps inflicted / received, teammate bumps
 - **plays** — demos inflicted, kickoff first touches and wins, double commits

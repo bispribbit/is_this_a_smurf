@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use feature_extractor::{MATCH_STAT_COUNT, MATCH_STAT_NAMES, PLAYERS_PER_TEAM_STAT, TOTAL_SLOTS};
+use feature_extractor::{MATCH_STAT_COUNT, MatchStat, TOTAL_SLOTS};
 use skill_model::{
     FrozenEnsemble, LobbySummary, MINIMUM_MATCH_SECONDS, MINIMUM_WINDOW_SECONDS, TabularLayout,
     TabularSkillModel,
@@ -84,7 +84,7 @@ impl Lobby {
             .iter()
             .flatten()
             .next()
-            .map(|stats| stats[PLAYERS_PER_TEAM_STAT].round() as usize)
+            .map(|stats| stats[MatchStat::PlayersPerTeam.index()].round() as usize)
     }
 
     /// Mean label over labelled slots.
@@ -111,9 +111,10 @@ pub fn read_lobbies(path: &Path) -> Result<Vec<Lobby>> {
     let mut reader =
         csv::Reader::from_path(path).with_context(|| format!("opening {}", path.display()))?;
     let headers = reader.headers()?.clone();
-    for (index, name) in MATCH_STAT_NAMES.iter().enumerate() {
+    for (index, stat) in MatchStat::all().enumerate() {
+        let name = stat.name();
         anyhow::ensure!(
-            headers.get(FIRST_STAT_COLUMN + index) == Some(*name),
+            headers.get(FIRST_STAT_COLUMN + index) == Some(name),
             "{}: column {} should be {name} — re-run extract_stats",
             path.display(),
             FIRST_STAT_COLUMN + index,
@@ -312,7 +313,7 @@ pub fn train_model(
     let absolute = fit(lobbies, layout, false, config);
     let within = fit(lobbies, &within_layout, true, config);
     let mut model = TabularSkillModel {
-        stat_names: MATCH_STAT_NAMES.iter().map(ToString::to_string).collect(),
+        stat_names: MatchStat::all().map(|stat| stat.to_string()).collect(),
         absolute_layout: layout.clone(),
         absolute: absolute.freeze(),
         within_layout,

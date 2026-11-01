@@ -1,8 +1,8 @@
 //! Per-player, whole-match summary statistics.
 //!
-//! These are the inputs of the skill model (see `docs/model.md`): 91 hand-written stats per
+//! These are the inputs of the skill model (see `docs/model.md`): 94 hand-written stats per
 //! player, covering movement, boost, positioning, ball control, mechanics (speed flips,
-//! half flips, wavedashes, flip resets, dribbles, double taps, 50/50s, bumps, ...), forfeits and own goals, the scoreboard
+//! half flips, wavedashes, tornado spins, flip resets, dribbles, double taps, 50/50s, bumps, ...), forfeits and own goals, the scoreboard
 //! and situational positioning, plus the playlist's team size.
 //!
 //! Everything positional is measured in the **team-canonical frame** (own goal at `−y`),
@@ -13,114 +13,11 @@
 use std::collections::HashMap;
 use std::ops::Range;
 
-use replay_structs::{BallState, ParsedReplay, Quaternion, Vector3};
+use replay_structs::{BallState, MATCH_STAT_COUNT, MatchStat, ParsedReplay, Quaternion, Vector3};
 
 use crate::{PlayerRoster, SLOTS_PER_TEAM, TOTAL_SLOTS, build_goal_replay_excluded_set};
 
-/// Names of the stats in [`PlayerMatchStats::values`] order.
-pub const MATCH_STAT_NAMES: [&str; MATCH_STAT_COUNT] = [
-    "mean_speed",
-    "supersonic_fraction",
-    "slow_fraction",
-    "ground_fraction",
-    "low_air_fraction",
-    "high_air_fraction",
-    "wall_fraction",
-    "mean_height",
-    "jumps_per_minute",
-    "mean_boost",
-    "boost_empty_fraction",
-    "boost_full_fraction",
-    "boost_collected_per_minute",
-    "boost_used_per_minute",
-    "big_pads_per_minute",
-    "small_pads_per_minute",
-    "boost_while_supersonic_fraction",
-    "defensive_third_fraction",
-    "offensive_third_fraction",
-    "mean_canonical_y",
-    "behind_ball_fraction",
-    "mean_distance_to_ball",
-    "closest_on_team_fraction",
-    "last_back_on_team_fraction",
-    "most_forward_on_team_fraction",
-    "mean_distance_to_nearest_teammate",
-    "mean_distance_to_own_goal",
-    "possession_fraction",
-    "touches_per_minute",
-    "mean_ball_speed_after_touch",
-    "aerial_touch_fraction",
-    "forward_touch_fraction",
-    "mean_touch_speed_gain",
-    "goals",
-    "demos_received",
-    "airborne_upright_fraction",
-    "slow_with_boost_fraction",
-    "supersonic_per_boost",
-    "jumps_pressed_per_minute",
-    "double_jumps_per_minute",
-    "dodges_per_minute",
-    "wavedash_like_dodges_per_minute",
-    "aerial_dodges_per_minute",
-    "pitch_positive_dodge_fraction",
-    "pitch_negative_dodge_fraction",
-    "roll_dodge_fraction",
-    "diagonal_dodge_fraction",
-    "fast_dodge_fraction",
-    "boosting_fraction",
-    "powerslide_fraction",
-    "air_roll_fraction",
-    "reverse_fraction",
-    "mean_absolute_steer",
-    "mean_air_angular_speed",
-    "fast_aerial_fraction",
-    "scoreboard_score_per_minute",
-    "scoreboard_assists",
-    "scoreboard_saves",
-    "scoreboard_shots",
-    "scoreboard_goals_per_shot",
-    "demos_inflicted",
-    "kickoff_first_touch_fraction",
-    "kickoff_win_fraction",
-    "double_commit_fraction",
-    "last_back_when_defending_fraction",
-    "goal_side_when_defending_fraction",
-    "last_back_goal_distance_when_defending",
-    "overcommit_fraction",
-    "shadow_defense_fraction",
-    "support_spacing_fraction",
-    "goal_side_after_touch_fraction",
-    "speed_flips_per_minute",
-    "half_flips_per_minute",
-    "wavedashes_per_minute",
-    "flip_resets_per_minute",
-    "ceiling_touches_per_minute",
-    "dribble_fraction",
-    "flicks_per_minute",
-    "air_dribble_touches_per_minute",
-    "double_taps_per_minute",
-    "wall_touch_fraction",
-    "flip_touch_fraction",
-    "power_shots_per_minute",
-    "fifty_fifties_per_minute",
-    "fifty_fifty_win_fraction",
-    "bumps_inflicted_per_minute",
-    "bumps_received_per_minute",
-    "teammate_bumps_per_minute",
-    "own_goals",
-    "lost_by_forfeit",
-    "forfeited_level_or_ahead",
-    "players_per_team",
-];
-
-/// Number of stats per player.
-pub const MATCH_STAT_COUNT: usize = 92;
-
-/// Index of `players_per_team` in [`MATCH_STAT_NAMES`]: the playlist's team size (1, 2 or
-/// 3), the same for every player. It lets one model serve duels, doubles and standard.
-pub const PLAYERS_PER_TEAM_STAT: usize = 91;
-
-/// One player's stats over one match, in [`MATCH_STAT_NAMES`] order.
+/// One player's stats over one match, in [`MatchStat`] order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlayerMatchStats {
     /// Stat values.
@@ -163,6 +60,33 @@ const HALF_FLIP_SECONDS: f32 = 1.2;
 const TURNED_AROUND_DOT: f32 = -0.7;
 /// Airborne time before a landing dodge counts as a wavedash rather than a jump and flip.
 const WAVEDASH_MINIMUM_AIRBORNE_SECONDS: f32 = 0.3;
+/// Airborne time after which coming back down counts as a landing (a hop is not one).
+const LANDING_MINIMUM_AIRBORNE_SECONDS: f32 = 0.5;
+/// Height at which a falling car's landing is judged: a frame or two before contact, and
+/// above a car lying on its side (~40), which never counts as grounded.
+const LANDING_HEIGHT: f32 = 60.0;
+/// Up-vector z above which the car comes down on its four wheels (about 45° of tilt).
+const LANDING_UPRIGHT_UP_Z: f32 = 0.7;
+/// Seconds after a landing at which the speed kept is measured.
+const LANDING_SPEED_SECONDS: f32 = 0.4;
+/// Horizontal speed at landing below which there is no momentum to keep (a car dropping
+/// straight down).
+const LANDING_MINIMUM_SPEED: f32 = 500.0;
+/// Cap on the speed kept: boosting away from a landing should not hide a bad one.
+const LANDING_MAXIMUM_SPEED_KEPT: f32 = 1.2;
+/// Replays store angular velocity in hundredths of rad/s (full air roll, 5.5 rad/s, is 550).
+const ANGULAR_VELOCITY_SCALE: f32 = 100.0;
+/// Roll rate (rad/s) of a tornado spin: over half of full air roll.
+const TORNADO_MINIMUM_ROLL_RATE: f32 = 3.0;
+/// Share of the rotation that must be roll, about the car's nose.
+const TORNADO_MINIMUM_ROLL_SHARE: f32 = 0.8;
+/// Spin time that makes a tornado spin. On 30 ranked replays per rank, at least one such
+/// spin in a match: 18 % of Bronze and Gold players, 43 % of Diamond, 64 % of Champion,
+/// 90 % of SSL.
+const TORNADO_MINIMUM_SECONDS: f32 = 0.5;
+/// Forward-vector dot product with the spin's first frame below which the nose has drifted
+/// (~35°): the spin is out of control, not a tornado spin.
+const TORNADO_MINIMUM_NOSE_STEADINESS: f32 = 0.82;
 /// Car-to-ball distance at which an airborne car can put its wheels on the ball.
 const FLIP_RESET_BALL_DISTANCE: f32 = 200.0;
 /// The ball rides on the car: its height over the car, its horizontal offset (the hood
@@ -208,6 +132,23 @@ struct HorizontalDirection {
     y: f32,
 }
 
+/// A landing waiting to see how much of its speed the car keeps.
+#[derive(Debug, Clone, Copy)]
+struct PendingLandingSpeed {
+    seconds_left: f32,
+    /// Horizontal speed when the landing was judged.
+    speed: f32,
+}
+
+/// An air roll in progress that may become a tornado spin.
+#[derive(Debug, Clone, Copy)]
+struct TornadoSpin {
+    seconds: f32,
+    /// The nose's direction when the spin started: a controlled spin keeps it.
+    start_forward: Vector3,
+    counted: bool,
+}
+
 /// A back flip waiting to see whether the car turns around (a half flip).
 #[derive(Debug, Clone, Copy)]
 struct PendingHalfFlip {
@@ -227,6 +168,10 @@ struct MechanicsState {
     carrying_seconds: f32,
     on_ceiling: bool,
     seconds_since_dodge: Option<f32>,
+    /// This airborne stretch's landing has been judged.
+    landing_judged: bool,
+    landing_speed: Option<PendingLandingSpeed>,
+    tornado: Option<TornadoSpin>,
 }
 
 /// The last touch of the ball, for air dribbles and double taps.
@@ -342,6 +287,12 @@ struct Accumulator {
     speed_flips: u32,
     half_flips: u32,
     wavedashes: u32,
+    tornado_spins: u32,
+    landings: u32,
+    clean_landings: u32,
+    /// Sum of the speed kept after landings with speed to keep, and how many there were.
+    landing_speed_kept: f64,
+    landings_with_speed: u32,
     flip_resets: u32,
     ceiling_touches: u32,
     dribble: f64,
@@ -385,6 +336,18 @@ fn up_z(rotation: &Quaternion) -> f32 {
         -rotation.x.mul_add(rotation.x, rotation.y * rotation.y),
         1.0,
     )
+}
+
+/// Direction the car's nose points.
+fn nose_direction(rotation: &Quaternion) -> Vector3 {
+    Vector3 {
+        x: 2.0f32.mul_add(
+            -rotation.y.mul_add(rotation.y, rotation.z * rotation.z),
+            1.0,
+        ),
+        y: 2.0 * rotation.x.mul_add(rotation.y, rotation.w * rotation.z),
+        z: 2.0 * rotation.x.mul_add(rotation.z, -rotation.w * rotation.y),
+    }
 }
 
 /// Horizontal direction the car's nose points, or `None` when it points (nearly) straight
@@ -1086,6 +1049,93 @@ fn accumulate_multi_frame_mechanics(
         accumulator.wavedashes += 1;
     }
 
+    // Landings: coming down after a real stretch in the air, the car should meet the
+    // ground on its four wheels, not its roof or side. Judged once per stretch, just above
+    // the ground.
+    let judging_landing = !previous.landing_judged
+        && previous.seconds_airborne > LANDING_MINIMUM_AIRBORNE_SECONDS
+        && height < LANDING_HEIGHT
+        && state.velocity.z <= 0.0;
+    if judging_landing {
+        accumulator.landings += 1;
+        accumulator.clean_landings += u32::from(up_z(&state.rotation) > LANDING_UPRIGHT_UP_Z);
+    }
+    let landing_judged = seconds_airborne > 0.0 && (previous.landing_judged || judging_landing);
+
+    // Momentum: the share of the landing's horizontal speed still there a moment later.
+    // A wavedash or a clean landing keeps it; landing on the roof or side throws it away.
+    let horizontal_speed = state.velocity.x.hypot(state.velocity.y);
+    let mut landing_speed = previous.landing_speed.map(|pending| PendingLandingSpeed {
+        seconds_left: pending.seconds_left - seconds,
+        ..pending
+    });
+    if let Some(pending) = landing_speed
+        && pending.seconds_left <= 0.0
+    {
+        accumulator.landing_speed_kept +=
+            f64::from((horizontal_speed / pending.speed).min(LANDING_MAXIMUM_SPEED_KEPT));
+        accumulator.landings_with_speed += 1;
+        landing_speed = None;
+    }
+    if judging_landing && horizontal_speed > LANDING_MINIMUM_SPEED {
+        landing_speed = Some(PendingLandingSpeed {
+            seconds_left: LANDING_SPEED_SECONDS,
+            speed: horizontal_speed,
+        });
+    }
+
+    // Tornado spins: a fast, sustained air roll while boosting (not a side flip), the nose
+    // held steady. The replay's own angular velocity is used: rotations update only every
+    // other frame or so and their differences are noisy.
+    let nose = nose_direction(&state.rotation);
+    let angular_velocity = &state.angular_velocity;
+    let roll_rate = angular_velocity
+        .z
+        .mul_add(
+            nose.z,
+            angular_velocity
+                .x
+                .mul_add(nose.x, angular_velocity.y * nose.y),
+        )
+        .abs()
+        / ANGULAR_VELOCITY_SCALE;
+    let spinning = !on_surface
+        && controls.boosting
+        && !controls.dodging
+        && roll_rate > TORNADO_MINIMUM_ROLL_RATE
+        && roll_rate
+            > TORNADO_MINIMUM_ROLL_SHARE * length(angular_velocity) / ANGULAR_VELOCITY_SCALE;
+    let tornado = match previous.tornado {
+        _ if !spinning => None,
+        Some(spin) => {
+            let steadiness = nose.z.mul_add(
+                spin.start_forward.z,
+                nose.x
+                    .mul_add(spin.start_forward.x, nose.y * spin.start_forward.y),
+            );
+            (steadiness > TORNADO_MINIMUM_NOSE_STEADINESS).then_some(TornadoSpin {
+                seconds: spin.seconds + seconds,
+                ..spin
+            })
+        }
+        None => Some(TornadoSpin {
+            seconds,
+            start_forward: nose,
+            counted: false,
+        }),
+    };
+    let tornado = tornado.map(|spin| {
+        if !spin.counted && spin.seconds >= TORNADO_MINIMUM_SECONDS {
+            accumulator.tornado_spins += 1;
+            TornadoSpin {
+                counted: true,
+                ..spin
+            }
+        } else {
+            spin
+        }
+    });
+
     // Speed flips: a fast, boosting, diagonal front flip off the ground.
     if dodge_started
         && height < LOW_DODGE_MAXIMUM_HEIGHT
@@ -1164,6 +1214,9 @@ fn accumulate_multi_frame_mechanics(
         } else {
             previous.seconds_since_dodge.map(|since| since + seconds)
         },
+        landing_judged,
+        landing_speed,
+        tornado,
     }
 }
 
@@ -1440,153 +1493,195 @@ fn finish(
             (value / f64::from(accumulator.touches)) as f32
         }
     };
-    let values = [
-        fraction(accumulator.speed) / 2300.0,
-        fraction(accumulator.supersonic),
-        fraction(accumulator.slow),
-        fraction(accumulator.ground),
-        fraction(accumulator.low_air),
-        fraction(accumulator.high_air),
-        fraction(accumulator.wall),
-        fraction(accumulator.height) / 2044.0,
-        per_minute(f64::from(accumulator.jumps)),
-        fraction(accumulator.boost),
-        fraction(accumulator.boost_empty),
-        fraction(accumulator.boost_full),
-        per_minute(accumulator.boost_collected * 100.0),
-        per_minute(accumulator.boost_used * 100.0),
-        per_minute(f64::from(accumulator.big_pads)),
-        per_minute(f64::from(accumulator.small_pads)),
-        fraction(accumulator.boost_while_supersonic),
-        fraction(accumulator.defensive_third),
-        fraction(accumulator.offensive_third),
-        fraction(accumulator.canonical_y) / 5120.0,
-        fraction(accumulator.behind_ball),
-        fraction(accumulator.distance_to_ball) / 7245.0,
-        fraction(accumulator.closest_on_team),
-        fraction(accumulator.last_back_on_team),
-        fraction(accumulator.most_forward_on_team),
-        if accumulator.nearest_teammate_seconds > 0.0 {
-            (accumulator.nearest_teammate_distance / accumulator.nearest_teammate_seconds) as f32
-                / 7245.0
-        } else {
-            0.0
-        },
-        fraction(accumulator.distance_to_own_goal) / 7245.0,
-        fraction(accumulator.possession),
-        per_minute(f64::from(accumulator.touches)),
-        per_touch(accumulator.ball_speed_after_touch) / 6000.0,
-        per_touch(f64::from(accumulator.aerial_touches)),
-        per_touch(f64::from(accumulator.forward_touches)),
-        per_touch(accumulator.touch_speed_gain) / 6000.0,
-        accumulator.goals as f32,
-        accumulator.demos_received as f32,
-        if accumulator.airborne_seconds > 0.0 {
-            (accumulator.airborne_upright / accumulator.airborne_seconds) as f32
-        } else {
-            0.0
-        },
-        fraction(accumulator.slow_with_boost),
-        if accumulator.boost_used > 0.0 {
-            (accumulator.supersonic / (accumulator.boost_used * 100.0)) as f32
-        } else {
-            0.0
-        },
-        per_minute(f64::from(accumulator.jump_presses)),
-        per_minute(f64::from(accumulator.double_jumps)),
-        per_minute(f64::from(accumulator.dodges)),
-        per_minute(f64::from(accumulator.wavedash_like_dodges)),
-        per_minute(f64::from(accumulator.aerial_dodges)),
-        per_dodge(accumulator.forward_dodges),
-        per_dodge(accumulator.backward_dodges),
-        per_dodge(accumulator.sideways_dodges),
-        per_dodge(accumulator.diagonal_dodges),
-        per_dodge(accumulator.fast_dodges),
-        fraction(accumulator.boosting),
-        fraction(accumulator.powerslide),
-        fraction(accumulator.air_roll),
-        fraction(accumulator.reverse),
-        fraction(accumulator.absolute_steer),
-        if accumulator.airborne_seconds > 0.0 {
-            (accumulator.air_angular_speed / accumulator.airborne_seconds) as f32
-        } else {
-            0.0
-        },
-        if accumulator.double_jumps > 0 {
-            accumulator.fast_aerials as f32 / accumulator.double_jumps as f32
-        } else {
-            0.0
-        },
-        scoreboard.map_or(0.0, |s| s.score as f32 / minutes as f32),
-        scoreboard.map_or(0.0, |s| s.assists as f32),
-        scoreboard.map_or(0.0, |s| s.saves as f32),
-        scoreboard.map_or(0.0, |s| s.shots as f32),
-        scoreboard.map_or(0.0, |s| {
+    let value = |stat: MatchStat| match stat {
+        MatchStat::MeanSpeed => fraction(accumulator.speed) / 2300.0,
+        MatchStat::SupersonicFraction => fraction(accumulator.supersonic),
+        MatchStat::SlowFraction => fraction(accumulator.slow),
+        MatchStat::GroundFraction => fraction(accumulator.ground),
+        MatchStat::LowAirFraction => fraction(accumulator.low_air),
+        MatchStat::HighAirFraction => fraction(accumulator.high_air),
+        MatchStat::WallFraction => fraction(accumulator.wall),
+        MatchStat::MeanHeight => fraction(accumulator.height) / 2044.0,
+        MatchStat::JumpsPerMinute => per_minute(f64::from(accumulator.jumps)),
+        MatchStat::MeanBoost => fraction(accumulator.boost),
+        MatchStat::BoostEmptyFraction => fraction(accumulator.boost_empty),
+        MatchStat::BoostFullFraction => fraction(accumulator.boost_full),
+        MatchStat::BoostCollectedPerMinute => per_minute(accumulator.boost_collected * 100.0),
+        MatchStat::BoostUsedPerMinute => per_minute(accumulator.boost_used * 100.0),
+        MatchStat::BigPadsPerMinute => per_minute(f64::from(accumulator.big_pads)),
+        MatchStat::SmallPadsPerMinute => per_minute(f64::from(accumulator.small_pads)),
+        MatchStat::BoostWhileSupersonicFraction => fraction(accumulator.boost_while_supersonic),
+        MatchStat::DefensiveThirdFraction => fraction(accumulator.defensive_third),
+        MatchStat::OffensiveThirdFraction => fraction(accumulator.offensive_third),
+        MatchStat::MeanCanonicalY => fraction(accumulator.canonical_y) / 5120.0,
+        MatchStat::BehindBallFraction => fraction(accumulator.behind_ball),
+        MatchStat::MeanDistanceToBall => fraction(accumulator.distance_to_ball) / 7245.0,
+        MatchStat::ClosestOnTeamFraction => fraction(accumulator.closest_on_team),
+        MatchStat::LastBackOnTeamFraction => fraction(accumulator.last_back_on_team),
+        MatchStat::MostForwardOnTeamFraction => fraction(accumulator.most_forward_on_team),
+        MatchStat::MeanDistanceToNearestTeammate => {
+            if accumulator.nearest_teammate_seconds > 0.0 {
+                (accumulator.nearest_teammate_distance / accumulator.nearest_teammate_seconds)
+                    as f32
+                    / 7245.0
+            } else {
+                0.0
+            }
+        }
+        MatchStat::MeanDistanceToOwnGoal => fraction(accumulator.distance_to_own_goal) / 7245.0,
+        MatchStat::PossessionFraction => fraction(accumulator.possession),
+        MatchStat::TouchesPerMinute => per_minute(f64::from(accumulator.touches)),
+        MatchStat::MeanBallSpeedAfterTouch => {
+            per_touch(accumulator.ball_speed_after_touch) / 6000.0
+        }
+        MatchStat::AerialTouchFraction => per_touch(f64::from(accumulator.aerial_touches)),
+        MatchStat::ForwardTouchFraction => per_touch(f64::from(accumulator.forward_touches)),
+        MatchStat::MeanTouchSpeedGain => per_touch(accumulator.touch_speed_gain) / 6000.0,
+        MatchStat::Goals => accumulator.goals as f32,
+        MatchStat::DemosReceived => accumulator.demos_received as f32,
+        MatchStat::AirborneUprightFraction => {
+            if accumulator.airborne_seconds > 0.0 {
+                (accumulator.airborne_upright / accumulator.airborne_seconds) as f32
+            } else {
+                0.0
+            }
+        }
+        MatchStat::SlowWithBoostFraction => fraction(accumulator.slow_with_boost),
+        MatchStat::SupersonicPerBoost => {
+            if accumulator.boost_used > 0.0 {
+                (accumulator.supersonic / (accumulator.boost_used * 100.0)) as f32
+            } else {
+                0.0
+            }
+        }
+        MatchStat::JumpsPressedPerMinute => per_minute(f64::from(accumulator.jump_presses)),
+        MatchStat::DoubleJumpsPerMinute => per_minute(f64::from(accumulator.double_jumps)),
+        MatchStat::DodgesPerMinute => per_minute(f64::from(accumulator.dodges)),
+        MatchStat::WavedashLikeDodgesPerMinute => {
+            per_minute(f64::from(accumulator.wavedash_like_dodges))
+        }
+        MatchStat::AerialDodgesPerMinute => per_minute(f64::from(accumulator.aerial_dodges)),
+        MatchStat::PitchPositiveDodgeFraction => per_dodge(accumulator.forward_dodges),
+        MatchStat::PitchNegativeDodgeFraction => per_dodge(accumulator.backward_dodges),
+        MatchStat::RollDodgeFraction => per_dodge(accumulator.sideways_dodges),
+        MatchStat::DiagonalDodgeFraction => per_dodge(accumulator.diagonal_dodges),
+        MatchStat::FastDodgeFraction => per_dodge(accumulator.fast_dodges),
+        MatchStat::BoostingFraction => fraction(accumulator.boosting),
+        MatchStat::PowerslideFraction => fraction(accumulator.powerslide),
+        MatchStat::AirRollFraction => fraction(accumulator.air_roll),
+        MatchStat::ReverseFraction => fraction(accumulator.reverse),
+        MatchStat::MeanAbsoluteSteer => fraction(accumulator.absolute_steer),
+        MatchStat::MeanAirAngularSpeed => {
+            if accumulator.airborne_seconds > 0.0 {
+                (accumulator.air_angular_speed / accumulator.airborne_seconds) as f32
+            } else {
+                0.0
+            }
+        }
+        MatchStat::FastAerialFraction => {
+            if accumulator.double_jumps > 0 {
+                accumulator.fast_aerials as f32 / accumulator.double_jumps as f32
+            } else {
+                0.0
+            }
+        }
+        MatchStat::ScoreboardScorePerMinute => {
+            scoreboard.map_or(0.0, |s| s.score as f32 / minutes as f32)
+        }
+        MatchStat::ScoreboardAssists => scoreboard.map_or(0.0, |s| s.assists as f32),
+        MatchStat::ScoreboardSaves => scoreboard.map_or(0.0, |s| s.saves as f32),
+        MatchStat::ScoreboardShots => scoreboard.map_or(0.0, |s| s.shots as f32),
+        MatchStat::ScoreboardGoalsPerShot => scoreboard.map_or(0.0, |s| {
             if s.shots > 0 {
                 s.goals as f32 / s.shots as f32
             } else {
                 0.0
             }
         }),
-        accumulator.demos_inflicted as f32,
-        if kickoff_count > 0 {
-            accumulator.kickoff_first_touches as f32 / kickoff_count as f32
-        } else {
-            0.0
-        },
-        if accumulator.kickoff_first_touches > 0 {
-            accumulator.kickoff_wins as f32 / accumulator.kickoff_first_touches as f32
-        } else {
-            0.0
-        },
-        fraction(accumulator.double_commit),
-        ratio(
+        MatchStat::DemosInflicted => accumulator.demos_inflicted as f32,
+        MatchStat::KickoffFirstTouchFraction => {
+            if kickoff_count > 0 {
+                accumulator.kickoff_first_touches as f32 / kickoff_count as f32
+            } else {
+                0.0
+            }
+        }
+        MatchStat::KickoffWinFraction => {
+            if accumulator.kickoff_first_touches > 0 {
+                accumulator.kickoff_wins as f32 / accumulator.kickoff_first_touches as f32
+            } else {
+                0.0
+            }
+        }
+        MatchStat::DoubleCommitFraction => fraction(accumulator.double_commit),
+        MatchStat::LastBackWhenDefendingFraction => ratio(
             accumulator.last_back_defending,
             accumulator.defending_seconds,
         ),
-        ratio(
+        MatchStat::GoalSideWhenDefendingFraction => ratio(
             accumulator.goal_side_defending,
             accumulator.defending_seconds,
         ),
-        ratio(
-            accumulator.last_back_goal_distance_defending,
-            accumulator.last_back_defending,
-        ) / 7245.0,
-        fraction(accumulator.overcommit),
-        ratio(
+        MatchStat::LastBackGoalDistanceWhenDefending => {
+            ratio(
+                accumulator.last_back_goal_distance_defending,
+                accumulator.last_back_defending,
+            ) / 7245.0
+        }
+        MatchStat::OvercommitFraction => fraction(accumulator.overcommit),
+        MatchStat::ShadowDefenseFraction => ratio(
             accumulator.shadow_defense,
             accumulator.opponent_possession_own_half,
         ),
-        ratio(accumulator.support_spacing, accumulator.teammate_possession),
-        ratio(
+        MatchStat::SupportSpacingFraction => {
+            ratio(accumulator.support_spacing, accumulator.teammate_possession)
+        }
+        MatchStat::GoalSideAfterTouchFraction => ratio(
             f64::from(accumulator.recovered_goal_side),
             f64::from(accumulator.recovery_touches),
         ),
-        per_minute(f64::from(accumulator.speed_flips)),
-        per_minute(f64::from(accumulator.half_flips)),
-        per_minute(f64::from(accumulator.wavedashes)),
-        per_minute(f64::from(accumulator.flip_resets)),
-        per_minute(f64::from(accumulator.ceiling_touches)),
-        fraction(accumulator.dribble),
-        per_minute(f64::from(accumulator.flicks)),
-        per_minute(f64::from(accumulator.air_dribble_touches)),
-        per_minute(f64::from(accumulator.double_taps)),
-        per_touch(f64::from(accumulator.wall_touches)),
-        per_touch(f64::from(accumulator.flip_touches)),
-        per_minute(f64::from(accumulator.power_shots)),
-        per_minute(f64::from(accumulator.fifty_fifties)),
-        ratio(
+        MatchStat::SpeedFlipsPerMinute => per_minute(f64::from(accumulator.speed_flips)),
+        MatchStat::HalfFlipsPerMinute => per_minute(f64::from(accumulator.half_flips)),
+        MatchStat::WavedashesPerMinute => per_minute(f64::from(accumulator.wavedashes)),
+        MatchStat::TornadoSpinsPerMinute => per_minute(f64::from(accumulator.tornado_spins)),
+        MatchStat::FlipResetsPerMinute => per_minute(f64::from(accumulator.flip_resets)),
+        MatchStat::CeilingTouchesPerMinute => per_minute(f64::from(accumulator.ceiling_touches)),
+        MatchStat::DribbleFraction => fraction(accumulator.dribble),
+        MatchStat::FlicksPerMinute => per_minute(f64::from(accumulator.flicks)),
+        MatchStat::AirDribbleTouchesPerMinute => {
+            per_minute(f64::from(accumulator.air_dribble_touches))
+        }
+        MatchStat::DoubleTapsPerMinute => per_minute(f64::from(accumulator.double_taps)),
+        MatchStat::WallTouchFraction => per_touch(f64::from(accumulator.wall_touches)),
+        MatchStat::FlipTouchFraction => per_touch(f64::from(accumulator.flip_touches)),
+        MatchStat::PowerShotsPerMinute => per_minute(f64::from(accumulator.power_shots)),
+        MatchStat::FiftyFiftiesPerMinute => per_minute(f64::from(accumulator.fifty_fifties)),
+        MatchStat::FiftyFiftyWinFraction => ratio(
             f64::from(accumulator.fifty_fifty_wins),
             f64::from(accumulator.fifty_fifties),
         ),
-        per_minute(f64::from(accumulator.bumps_inflicted)),
-        per_minute(f64::from(accumulator.bumps_received)),
-        per_minute(f64::from(accumulator.teammate_bumps)),
-        accumulator.own_goals as f32,
-        f32::from(u8::from(accumulator.lost_by_forfeit)),
-        f32::from(u8::from(accumulator.forfeited_level_or_ahead)),
-        players_per_team as f32,
-    ];
+        MatchStat::BumpsInflictedPerMinute => per_minute(f64::from(accumulator.bumps_inflicted)),
+        MatchStat::BumpsReceivedPerMinute => per_minute(f64::from(accumulator.bumps_received)),
+        MatchStat::TeammateBumpsPerMinute => per_minute(f64::from(accumulator.teammate_bumps)),
+        MatchStat::OwnGoals => accumulator.own_goals as f32,
+        MatchStat::LostByForfeit => f32::from(u8::from(accumulator.lost_by_forfeit)),
+        MatchStat::ForfeitedLevelOrAhead => {
+            f32::from(u8::from(accumulator.forfeited_level_or_ahead))
+        }
+        MatchStat::CleanLandingFraction => ratio(
+            f64::from(accumulator.clean_landings),
+            f64::from(accumulator.landings),
+        ),
+        MatchStat::LandingSpeedKeptFraction => ratio(
+            accumulator.landing_speed_kept,
+            f64::from(accumulator.landings_with_speed),
+        ),
+        MatchStat::PlayersPerTeam => players_per_team as f32,
+    };
+    let mut values = [0.0; MATCH_STAT_COUNT];
+    for stat in MatchStat::all() {
+        values[stat.index()] = value(stat);
+    }
     Some(PlayerMatchStats {
         values,
         live_seconds: seconds as f32,
@@ -1656,13 +1751,6 @@ mod tests {
         }
     }
 
-    fn index_of(name: &str) -> usize {
-        MATCH_STAT_NAMES
-            .iter()
-            .position(|stat| *stat == name)
-            .unwrap_or(usize::MAX)
-    }
-
     /// Mirrored positions produce identical positional stats for the two teams.
     #[test]
     fn positions_are_team_canonical() {
@@ -1677,21 +1765,21 @@ mod tests {
         let orange = stats[SLOTS_PER_TEAM]
             .as_ref()
             .map_or([0.0; MATCH_STAT_COUNT], |s| s.values);
-        let defensive = index_of("defensive_third_fraction");
+        let defensive = MatchStat::DefensiveThirdFraction.index();
         assert!((blue[defensive] - 1.0).abs() < 1e-6);
         assert!((orange[defensive] - 1.0).abs() < 1e-6);
-        let last_back = index_of("last_back_on_team_fraction");
+        let last_back = MatchStat::LastBackOnTeamFraction.index();
         assert!((blue[last_back] - 1.0).abs() < 1e-6);
         assert!((orange[last_back] - 1.0).abs() < 1e-6);
         assert!(
-            (blue[index_of("mean_canonical_y")] - orange[index_of("mean_canonical_y")]).abs()
+            (blue[MatchStat::MeanCanonicalY.index()] - orange[MatchStat::MeanCanonicalY.index()])
+                .abs()
                 < 1e-6
         );
     }
 
     #[test]
-    fn names_and_values_have_the_same_length() {
-        assert_eq!(MATCH_STAT_NAMES.len(), MATCH_STAT_COUNT);
+    fn every_rostered_player_gets_stats() {
         let parsed = ParsedReplay {
             frames: vec![frame(0.0, 0.0), frame(0.0, 0.0)],
             ..ParsedReplay::default()
@@ -1703,7 +1791,7 @@ mod tests {
         }
         let players_per_team = stats[0]
             .as_ref()
-            .map_or(0.0, |s| s.values[PLAYERS_PER_TEAM_STAT]);
+            .map_or(0.0, |s| s.values[MatchStat::PlayersPerTeam.index()]);
         assert!((players_per_team - 3.0).abs() < f32::EPSILON);
     }
 
@@ -1723,7 +1811,7 @@ mod tests {
             .as_ref()
             .map_or([0.0; MATCH_STAT_COUNT], |s| s.values);
         let seconds = 30.0 / 30.0;
-        assert!((values[index_of("big_pads_per_minute")] - 60.0 / seconds).abs() < 1e-3);
+        assert!((values[MatchStat::BigPadsPerMinute.index()] - 60.0 / seconds).abs() < 1e-3);
     }
 
     fn stats_of_first_car(frames: Vec<GameFrame>) -> [f32; MATCH_STAT_COUNT] {
@@ -1753,10 +1841,114 @@ mod tests {
                 car.controls.double_jumping = double_jump && index >= 10;
                 car.controls.dodging = dodge && index >= 20;
             }
-            stats_of_first_car(frames)[index_of("flip_resets_per_minute")]
+            stats_of_first_car(frames)[MatchStat::FlipResetsPerMinute.index()]
         };
         assert!(airborne(true, true) > 0.0);
         assert!(airborne(true, false).abs() < f32::EPSILON);
+    }
+
+    /// Coming down from the air on the wheels is a clean landing; on the roof it is not.
+    #[test]
+    fn landing_on_the_wheels_is_clean() {
+        let landing = |rotation: Quaternion| {
+            let mut frames: Vec<GameFrame> = (0..60).map(|_| frame(0.0, 0.0)).collect();
+            for (index, later) in frames.iter_mut().enumerate() {
+                let car = &mut later.players[0].actor_state;
+                // Up for a second, then down at ~25 per frame.
+                if (5..30).contains(&index) {
+                    car.position.z = 300.0;
+                } else if (30..42).contains(&index) {
+                    car.position.z = ((index - 29) as f32).mul_add(-25.0, 300.0);
+                    car.velocity.z = -750.0;
+                    car.rotation = rotation;
+                } else if index >= 42 {
+                    car.rotation = rotation;
+                }
+            }
+            stats_of_first_car(frames)[MatchStat::CleanLandingFraction.index()]
+        };
+        let wheels_down = Quaternion {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            w: 1.0,
+        };
+        // Half a turn about the forward axis: on the roof.
+        let on_the_roof = Quaternion {
+            x: 1.0,
+            y: 0.0,
+            z: 0.0,
+            w: 0.0,
+        };
+        assert!((landing(wheels_down) - 1.0).abs() < f32::EPSILON);
+        assert!(landing(on_the_roof).abs() < f32::EPSILON);
+    }
+
+    /// Driving on at the landing's speed keeps all of it; stopping dead keeps none.
+    #[test]
+    fn landing_speed_kept_is_measured_after_touchdown() {
+        let landing = |speed_after: f32| {
+            let mut frames: Vec<GameFrame> = (0..70).map(|_| frame(0.0, 0.0)).collect();
+            for (index, later) in frames.iter_mut().enumerate() {
+                let car = &mut later.players[0].actor_state;
+                car.rotation.w = 1.0;
+                car.velocity.y = 1000.0;
+                if (5..30).contains(&index) {
+                    car.position.z = 300.0;
+                } else if (30..42).contains(&index) {
+                    car.position.z = ((index - 29) as f32).mul_add(-25.0, 300.0);
+                    car.velocity.z = -750.0;
+                } else if index >= 42 {
+                    car.velocity.y = speed_after;
+                }
+            }
+            stats_of_first_car(frames)[MatchStat::LandingSpeedKeptFraction.index()]
+        };
+        assert!((landing(1000.0) - 1.0).abs() < 1e-3);
+        assert!(landing(0.0).abs() < 1e-3);
+    }
+
+    /// A second of fast, boosting air roll with the nose held steady is a tornado spin; the
+    /// same roll with the nose swinging around is not.
+    #[test]
+    fn a_steady_boosting_air_roll_is_a_tornado_spin() {
+        let spin = |nose_drift_per_frame: f32| {
+            let mut frames: Vec<GameFrame> = (0..60).map(|_| frame(0.0, 0.0)).collect();
+            for (index, later) in frames.iter_mut().enumerate() {
+                let car = &mut later.players[0].actor_state;
+                car.position.z = 800.0;
+                car.controls.boosting = true;
+                let nose = |rotation: &Quaternion| nose_direction(rotation);
+                // Nose 30° up, yaw drifting by `nose_drift_per_frame`, rolling 5 rad/s about
+                // the nose (yaw, then pitch, then roll).
+                let yaw = index as f32 * nose_drift_per_frame;
+                let pitch = -30.0f32.to_radians();
+                let roll = 5.0 * index as f32 / 30.0;
+                let (yaw_sine, yaw_cosine) = (yaw / 2.0).sin_cos();
+                let (pitch_sine, pitch_cosine) = (pitch / 2.0).sin_cos();
+                let (roll_sine, roll_cosine) = (roll / 2.0).sin_cos();
+                car.rotation = Quaternion {
+                    w: (yaw_cosine * pitch_cosine)
+                        .mul_add(roll_cosine, yaw_sine * pitch_sine * roll_sine),
+                    x: (yaw_cosine * pitch_cosine)
+                        .mul_add(roll_sine, -(yaw_sine * pitch_sine * roll_cosine)),
+                    y: (yaw_cosine * pitch_sine)
+                        .mul_add(roll_cosine, yaw_sine * pitch_cosine * roll_sine),
+                    z: (yaw_sine * pitch_cosine)
+                        .mul_add(roll_cosine, -(yaw_cosine * pitch_sine * roll_sine)),
+                };
+                // 5 rad/s about the nose, in the replay's hundredths.
+                let direction = nose(&car.rotation);
+                car.angular_velocity = Vector3 {
+                    x: direction.x * 500.0,
+                    y: direction.y * 500.0,
+                    z: direction.z * 500.0,
+                };
+            }
+            stats_of_first_car(frames)[MatchStat::TornadoSpinsPerMinute.index()]
+        };
+        assert!(spin(0.0) > 0.0);
+        assert!(spin(0.1).abs() < f32::EPSILON);
     }
 
     /// Driving into an opponent who gets knocked back is a bump for the driver.
@@ -1772,14 +1964,12 @@ mod tests {
             ..ParsedReplay::default()
         };
         let stats = compute_player_match_stats(&parsed, &roster());
-        let value = |slot: usize, name: &str| {
-            stats[slot]
-                .as_ref()
-                .map_or(0.0, |s| s.values[index_of(name)])
+        let value = |slot: usize, stat: MatchStat| {
+            stats[slot].as_ref().map_or(0.0, |s| s.values[stat.index()])
         };
-        assert!(value(0, "bumps_inflicted_per_minute") > 0.0);
-        assert!(value(SLOTS_PER_TEAM, "bumps_received_per_minute") > 0.0);
-        assert!(value(SLOTS_PER_TEAM, "bumps_inflicted_per_minute").abs() < f32::EPSILON);
+        assert!(value(0, MatchStat::BumpsInflictedPerMinute) > 0.0);
+        assert!(value(SLOTS_PER_TEAM, MatchStat::BumpsReceivedPerMinute) > 0.0);
+        assert!(value(SLOTS_PER_TEAM, MatchStat::BumpsInflictedPerMinute).abs() < f32::EPSILON);
     }
 
     /// A fast, boosting, diagonal front flip off the ground is a speed flip.
@@ -1801,7 +1991,7 @@ mod tests {
                 };
             }
         }
-        assert!(stats_of_first_car(frames)[index_of("speed_flips_per_minute")] > 0.0);
+        assert!(stats_of_first_car(frames)[MatchStat::SpeedFlipsPerMinute.index()] > 0.0);
     }
 }
 
@@ -1933,11 +2123,8 @@ mod situational_tests {
         }
     }
 
-    fn stat(values: &[f32; MATCH_STAT_COUNT], name: &str) -> f32 {
-        MATCH_STAT_NAMES
-            .iter()
-            .position(|stat| *stat == name)
-            .map_or(f32::NAN, |index| values[index])
+    fn stat(values: &[f32; MATCH_STAT_COUNT], stat: MatchStat) -> f32 {
+        values[stat.index()]
     }
 
     /// Ball deep in blue's half, an orange attacker on it. Blue: b0 in net (last back,
@@ -1986,15 +2173,22 @@ mod situational_tests {
                 .map_or([0.0; MATCH_STAT_COUNT], |s| s.values)
         };
 
-        assert!((stat(&values(0), "last_back_when_defending_fraction") - 1.0).abs() < 1e-6);
-        assert!((stat(&values(1), "last_back_when_defending_fraction")).abs() < 1e-6);
-        assert!((stat(&values(0), "goal_side_when_defending_fraction") - 1.0).abs() < 1e-6);
-        assert!((stat(&values(2), "goal_side_when_defending_fraction")).abs() < 1e-6);
-        assert!((stat(&values(1), "shadow_defense_fraction") - 1.0).abs() < 1e-6);
-        assert!((stat(&values(0), "shadow_defense_fraction")).abs() < 1e-6);
-        assert!((stat(&values(2), "overcommit_fraction") - 1.0).abs() < 1e-6);
-        assert!((stat(&values(0), "overcommit_fraction")).abs() < 1e-6);
+        assert!((stat(&values(0), MatchStat::LastBackWhenDefendingFraction) - 1.0).abs() < 1e-6);
+        assert!((stat(&values(1), MatchStat::LastBackWhenDefendingFraction)).abs() < 1e-6);
+        assert!((stat(&values(0), MatchStat::GoalSideWhenDefendingFraction) - 1.0).abs() < 1e-6);
+        assert!((stat(&values(2), MatchStat::GoalSideWhenDefendingFraction)).abs() < 1e-6);
+        assert!((stat(&values(1), MatchStat::ShadowDefenseFraction) - 1.0).abs() < 1e-6);
+        assert!((stat(&values(0), MatchStat::ShadowDefenseFraction)).abs() < 1e-6);
+        assert!((stat(&values(2), MatchStat::OvercommitFraction) - 1.0).abs() < 1e-6);
+        assert!((stat(&values(0), MatchStat::OvercommitFraction)).abs() < 1e-6);
         // Orange is attacking, not defending.
-        assert!((stat(&values(SLOTS_PER_TEAM), "goal_side_when_defending_fraction")).abs() < 1e-6);
+        assert!(
+            (stat(
+                &values(SLOTS_PER_TEAM),
+                MatchStat::GoalSideWhenDefendingFraction
+            ))
+            .abs()
+                < 1e-6
+        );
     }
 }

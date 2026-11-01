@@ -13,7 +13,8 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::Parser;
-use feature_extractor::{MATCH_STAT_COUNT, MATCH_STAT_NAMES};
+use feature_extractor::{MATCH_STAT_COUNT, MatchStat};
+use replay_structs::TeamSize;
 use skill_model::{PlaysLikeModel, TabularLayout, TabularSkillModel};
 use skill_model_training::dataset::{Lobby, evaluate, read_lobbies, train_model};
 use skill_model_training::evaluation::{
@@ -25,24 +26,24 @@ use skill_model_training::label_cleaning::{
 };
 
 /// The mechanics added after the first tree models: speed flips to bumps.
-const NAMED_MECHANICS_STATS: [&str; 17] = [
-    "speed_flips_per_minute",
-    "half_flips_per_minute",
-    "wavedashes_per_minute",
-    "flip_resets_per_minute",
-    "ceiling_touches_per_minute",
-    "dribble_fraction",
-    "flicks_per_minute",
-    "air_dribble_touches_per_minute",
-    "double_taps_per_minute",
-    "wall_touch_fraction",
-    "flip_touch_fraction",
-    "power_shots_per_minute",
-    "fifty_fifties_per_minute",
-    "fifty_fifty_win_fraction",
-    "bumps_inflicted_per_minute",
-    "bumps_received_per_minute",
-    "teammate_bumps_per_minute",
+const NAMED_MECHANICS_STATS: [MatchStat; 17] = [
+    MatchStat::SpeedFlipsPerMinute,
+    MatchStat::HalfFlipsPerMinute,
+    MatchStat::WavedashesPerMinute,
+    MatchStat::FlipResetsPerMinute,
+    MatchStat::CeilingTouchesPerMinute,
+    MatchStat::DribbleFraction,
+    MatchStat::FlicksPerMinute,
+    MatchStat::AirDribbleTouchesPerMinute,
+    MatchStat::DoubleTapsPerMinute,
+    MatchStat::WallTouchFraction,
+    MatchStat::FlipTouchFraction,
+    MatchStat::PowerShotsPerMinute,
+    MatchStat::FiftyFiftiesPerMinute,
+    MatchStat::FiftyFiftyWinFraction,
+    MatchStat::BumpsInflictedPerMinute,
+    MatchStat::BumpsReceivedPerMinute,
+    MatchStat::TeammateBumpsPerMinute,
 ];
 
 #[derive(Parser, Debug)]
@@ -55,27 +56,6 @@ struct Args {
     #[arg(long, value_delimiter = ',', default_value = "1,2,3")]
     seeds: Vec<u64>,
 }
-
-/// One playlist size and its report name.
-struct Playlist {
-    players_per_team: usize,
-    name: &'static str,
-}
-
-const PLAYLISTS: [Playlist; 3] = [
-    Playlist {
-        players_per_team: 1,
-        name: "duels",
-    },
-    Playlist {
-        players_per_team: 2,
-        name: "doubles",
-    },
-    Playlist {
-        players_per_team: 3,
-        name: "standard",
-    },
-];
 
 /// One stat set under test.
 struct Arm {
@@ -145,23 +125,21 @@ fn main() -> Result<()> {
         deviation: all_stats.deviation,
         lobby_mean: all_stats.lobby_mean,
         team_context: all_stats.team_context,
-        stats: MATCH_STAT_NAMES
-            .iter()
-            .enumerate()
-            .filter(|(_, name)| !NAMED_MECHANICS_STATS.contains(name))
-            .map(|(index, _)| index)
+        stats: MatchStat::all()
+            .filter(|stat| !NAMED_MECHANICS_STATS.contains(stat))
+            .map(feature_extractor::MatchStat::index)
             .collect(),
     };
     let mut arms = [
         Arm {
             name: "without named mechanics",
             layout: without_named_mechanics,
-            runs_by_playlist: PLAYLISTS.iter().map(|_| Vec::new()).collect(),
+            runs_by_playlist: TeamSize::all().map(|_| Vec::new()).collect(),
         },
         Arm {
             name: "all stats",
             layout: all_stats,
-            runs_by_playlist: PLAYLISTS.iter().map(|_| Vec::new()).collect(),
+            runs_by_playlist: TeamSize::all().map(|_| Vec::new()).collect(),
         },
     ];
 
@@ -173,13 +151,12 @@ fn main() -> Result<()> {
         MATCH_MODEL_CLEANING_ROUNDS,
         CLEAN_MARGIN_MMR,
     );
-    let by_playlist: Vec<Vec<Lobby>> = PLAYLISTS
-        .iter()
+    let by_playlist: Vec<Vec<Lobby>> = TeamSize::all()
         .map(|playlist| {
             cleaned
                 .lobbies
                 .iter()
-                .filter(|lobby| lobby.players_per_team() == Some(playlist.players_per_team))
+                .filter(|lobby| lobby.players_per_team() == Some(playlist.players_per_team()))
                 .cloned()
                 .collect()
         })
@@ -193,12 +170,11 @@ fn main() -> Result<()> {
         for arm in &mut arms {
             println!("seed {seed}: {}", arm.name);
             let model = train_model(&cleaned.lobbies, &arm.layout, &config);
-            for ((playlist, playlist_lobbies), runs) in PLAYLISTS
-                .iter()
+            for ((playlist, playlist_lobbies), runs) in TeamSize::all()
                 .zip(&by_playlist)
                 .zip(&mut arm.runs_by_playlist)
             {
-                runs.push(score(playlist_lobbies, &model, playlist.players_per_team));
+                runs.push(score(playlist_lobbies, &model, playlist.players_per_team()));
             }
         }
     }
@@ -207,8 +183,8 @@ fn main() -> Result<()> {
         "\nEvaluation split, mean over {} seeds (± half the seed range):",
         args.seeds.len()
     );
-    for (index, playlist) in PLAYLISTS.iter().enumerate() {
-        println!("  {}", playlist.name);
+    for (index, playlist) in TeamSize::all().enumerate() {
+        println!("  {}", playlist.name());
         for arm in &arms {
             if let Some(runs) = arm.runs_by_playlist.get(index) {
                 print_runs(arm.name, runs);

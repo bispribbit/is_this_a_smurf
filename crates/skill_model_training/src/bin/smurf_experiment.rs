@@ -30,7 +30,9 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use feature_extractor::{MATCH_STAT_NAMES, TOTAL_SLOTS};
+use feature_extractor::{MATCH_STAT_COUNT, TOTAL_SLOTS};
+use replay_structs::Rank;
+use replay_structs::TeamSize;
 use skill_model::coaching::tier_index;
 use skill_model::{OPPONENT_INDEPENDENT_STATS, PlaysLikeModel, SkillModelBundle};
 use skill_model_training::dataset::{Lobby, Partition, read_lobbies};
@@ -40,8 +42,8 @@ use skill_model_training::label_cleaning::{
     SlotScores, clean_labels_in_rounds, train_plays_like_model,
 };
 use skill_model_training::smurf_references::{
-    HIGH_RANK_TIER, MECHANIC_STATS, TIER_NAMES, as_tiers, is_dominant_smurf, is_mechanical_smurf,
-    median, reference_mechanics, team_goal_difference,
+    HIGH_RANK_TIER, MECHANIC_STATS, as_tiers, is_dominant_smurf, is_mechanical_smurf, median,
+    reference_mechanics, team_goal_difference,
 };
 use uuid::Uuid;
 
@@ -68,27 +70,6 @@ struct Args {
     #[arg(long, default_value_t = 6)]
     examples: usize,
 }
-
-/// One playlist size and its report name.
-struct Playlist {
-    players_per_team: usize,
-    name: &'static str,
-}
-
-const PLAYLISTS: [Playlist; 3] = [
-    Playlist {
-        players_per_team: 1,
-        name: "duels",
-    },
-    Playlist {
-        players_per_team: 2,
-        name: "doubles",
-    },
-    Playlist {
-        players_per_team: 3,
-        name: "standard",
-    },
-];
 
 /// A per-player score, by replay.
 struct Scorer {
@@ -258,7 +239,7 @@ fn print_examples(players: &[EvaluatedPlayer], scorer_index: usize, count: usize
         .sort_by(|left, right| right.margins[scorer_index].total_cmp(&left.margins[scorer_index]));
     for player in ranked.into_iter().take(count) {
         let label = if player.label > 0.0 {
-            TIER_NAMES[tier_index(player.label)]
+            Rank::from_tier_index(tier_index(player.label)).short_name()
         } else {
             "?"
         };
@@ -266,7 +247,7 @@ fn print_examples(players: &[EvaluatedPlayer], scorer_index: usize, count: usize
             "      {} slot {}  label {label:<3}  plays like {:<3} (+{:.1} divisions over the others)  goal difference {:+.0}{}",
             player.replay_id,
             player.slot,
-            TIER_NAMES[(player.scores[scorer_index] as usize).min(21)],
+            Rank::from_tier_index(player.scores[scorer_index] as usize).short_name(),
             player.margins[scorer_index],
             player.goal_difference,
             match (player.mechanical, player.dominant) {
@@ -281,11 +262,11 @@ fn print_examples(players: &[EvaluatedPlayer], scorer_index: usize, count: usize
 
 /// How well a variant's plays-like score estimates the label, on evaluation players.
 fn print_accuracy(lobbies: &[Lobby], model: &PlaysLikeModel) {
-    for playlist in &PLAYLISTS {
+    for playlist in TeamSize::all() {
         let mut errors = Vec::new();
         for lobby in lobbies.iter().filter(|lobby| {
             lobby.partition == Partition::Evaluation
-                && lobby.players_per_team() == Some(playlist.players_per_team)
+                && lobby.players_per_team() == Some(playlist.players_per_team())
         }) {
             let scores = model.predict_stats(&lobby.stat_references());
             for slot in lobby.labelled_slots() {
@@ -297,7 +278,7 @@ fn print_accuracy(lobbies: &[Lobby], model: &PlaysLikeModel) {
         let count = errors.len().max(1) as f64;
         println!(
             "  {:<9} plays-like vs label: rmse={:.0}  mean error={:+.0}  players={}",
-            playlist.name,
+            playlist.name(),
             (errors.iter().map(|error| error * error).sum::<f64>() / count).sqrt(),
             errors.iter().sum::<f64>() / count,
             errors.len(),
@@ -360,7 +341,7 @@ fn main() -> Result<()> {
     println!(
         "opponent-independent plays-like model: {} of {} stats",
         OPPONENT_INDEPENDENT_STATS.len(),
-        MATCH_STAT_NAMES.len()
+        MATCH_STAT_COUNT
     );
 
     let evaluation: Vec<&Lobby> = lobbies
@@ -430,22 +411,22 @@ fn main() -> Result<()> {
     }
 
     println!("== evaluation split");
-    for playlist in &PLAYLISTS {
+    for playlist in TeamSize::all() {
         let playlist_lobbies: Vec<&Lobby> = evaluation
             .iter()
             .copied()
-            .filter(|lobby| lobby.players_per_team() == Some(playlist.players_per_team))
+            .filter(|lobby| lobby.players_per_team() == Some(playlist.players_per_team()))
             .collect();
         if playlist_lobbies.is_empty() {
             continue;
         }
         let all_playlist: Vec<Lobby> = lobbies
             .iter()
-            .filter(|lobby| lobby.players_per_team() == Some(playlist.players_per_team))
+            .filter(|lobby| lobby.players_per_team() == Some(playlist.players_per_team()))
             .cloned()
             .collect();
         let reference = reference_mechanics(&all_playlist);
-        println!("  {} ({} replays)", playlist.name, playlist_lobbies.len());
+        println!("  {} ({} replays)", playlist.name(), playlist_lobbies.len());
         let players = evaluated_players(&playlist_lobbies, &scorers, &reference);
         print_flag_report(&players, &scorers);
         for (index, scorer) in scorers.iter().enumerate() {

@@ -25,7 +25,7 @@ use replay_structs::{ParsedReplay, Team};
 
 use crate::SkillModelBundle;
 use crate::coaching::{CoachingAdvice, smurf_line};
-use crate::mechanics::{MechanicEvidence, mechanics_above_lobby};
+use crate::mechanics::{MechanicEvidence, drop_rare_mechanics, mechanics_above_lobby};
 use crate::smurf::{SmurfReason, smurf_suspicions};
 
 /// Players with less live time than this in a window get no timeline score there. Same
@@ -118,12 +118,17 @@ impl SkillModelBundle {
         let plays_like_mmr = plays_like.combined_mmr();
         let stat_values: [Option<&[f32; MATCH_STAT_COUNT]>; TOTAL_SLOTS] =
             core::array::from_fn(|slot| match_stats[slot].as_ref().map(|stats| &stats.values));
-        let mechanics = mechanics_above_lobby(
+        let mut mechanics = mechanics_above_lobby(
             self.mechanics
                 .for_players_per_team(parsed.match_format.players_per_team),
             &stat_values,
             &match_mmr,
         );
+        for (evidence, stats) in mechanics.iter_mut().zip(&match_stats) {
+            if let Some(stats) = stats {
+                drop_rare_mechanics(evidence, stats.live_seconds);
+            }
+        }
         let smurf = smurf_suspicions(
             &match_mmr,
             &plays_like,

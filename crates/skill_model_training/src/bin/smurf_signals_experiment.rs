@@ -35,7 +35,8 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use feature_extractor::{MATCH_STAT_COUNT, TOTAL_SLOTS};
+use feature_extractor::{MATCH_STAT_COUNT, MatchStat, TOTAL_SLOTS};
+use replay_structs::TeamSize;
 use skill_model::coaching::tier_index;
 use skill_model::mechanics::MechanicTables;
 use skill_model::{
@@ -54,7 +55,7 @@ use skill_model_training::label_cleaning::{
 use skill_model_training::mechanic_table::build_mechanic_tables;
 use skill_model_training::smurf_references::{
     HIGH_RANK_TIER, MECHANIC_STATS, as_tiers, is_dominant_smurf, is_mechanical_smurf, median,
-    reference_mechanics, stat_index,
+    reference_mechanics,
 };
 use uuid::Uuid;
 
@@ -71,27 +72,6 @@ struct Args {
 
 /// High quantiles a mechanic rate must beat, within the lobby's tier.
 const MECHANIC_QUANTILES: [f32; 2] = [0.9, 0.95];
-
-/// One playlist size and its report name.
-struct Playlist {
-    players_per_team: usize,
-    name: &'static str,
-}
-
-const PLAYLISTS: [Playlist; 3] = [
-    Playlist {
-        players_per_team: 1,
-        name: "duels",
-    },
-    Playlist {
-        players_per_team: 2,
-        name: "doubles",
-    },
-    Playlist {
-        players_per_team: 3,
-        name: "standard",
-    },
-];
 
 /// Extra training labels dropped on top of label cleaning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -191,10 +171,10 @@ fn drop_rule_labels(
 
 /// Match-model rank metrics per playlist on the evaluation split.
 fn print_playlist_metrics(lobbies: &[Lobby], model: &TabularSkillModel) {
-    for playlist in &PLAYLISTS {
+    for playlist in TeamSize::all() {
         let playlist_lobbies: Vec<Lobby> = lobbies
             .iter()
-            .filter(|lobby| lobby.players_per_team() == Some(playlist.players_per_team))
+            .filter(|lobby| lobby.players_per_team() == Some(playlist.players_per_team()))
             .cloned()
             .collect();
         let predictions: Vec<PlayerPrediction> = evaluate(&playlist_lobbies, model)
@@ -203,11 +183,11 @@ fn print_playlist_metrics(lobbies: &[Lobby], model: &TabularSkillModel) {
             .collect();
         let metrics = compute_lobby_metrics_with_minimum(
             &predictions,
-            MINIMUM_PLAYERS_PER_LOBBY.min(playlist.players_per_team * 2),
+            MINIMUM_PLAYERS_PER_LOBBY.min(playlist.players_per_team() * 2),
         );
         println!(
             "    {:<9} within_r={:.3} ±{:.3}  concordance={:.3}  lobby_rmse={:.0}  player_rmse={:.0}",
-            playlist.name,
+            playlist.name(),
             metrics.within_r,
             metrics.within_r_standard_error,
             metrics.concordance,
@@ -306,7 +286,7 @@ fn evaluated_players(
                 mechanical: is_mechanical_smurf(lobby, slot, references.for_lobby(lobby)),
                 dominant: is_dominant_smurf(lobby, slot),
                 margins,
-                forfeited_level_or_ahead: stats[stat_index("forfeited_level_or_ahead")] > 0.0,
+                forfeited_level_or_ahead: stats[MatchStat::ForfeitedLevelOrAhead.index()] > 0.0,
                 mechanics_above: mechanic_tables
                     .iter()
                     .map(|tables| {
@@ -497,11 +477,11 @@ fn main() -> Result<()> {
     let models: Vec<&ModelTiers> = rule_tiers.iter().chain(&group_tiers).collect();
     let group_range = TRAINING_RULES.len()..models.len();
     println!("== evaluation split, every variant flagging the same number of players");
-    for playlist in &PLAYLISTS {
+    for playlist in TeamSize::all() {
         let playlist_lobbies: Vec<&Lobby> = evaluation
             .iter()
             .copied()
-            .filter(|lobby| lobby.players_per_team() == Some(playlist.players_per_team))
+            .filter(|lobby| lobby.players_per_team() == Some(playlist.players_per_team()))
             .collect();
         let players = evaluated_players(
             &playlist_lobbies,
@@ -510,7 +490,7 @@ fn main() -> Result<()> {
             &references,
             &mechanic_tables,
         );
-        let shipped_margin = smurf_margin_over_others_tiers(playlist.players_per_team);
+        let shipped_margin = smurf_margin_over_others_tiers(playlist.players_per_team());
         let shipped_count = players
             .iter()
             .filter(|player| player.margins[0] > shipped_margin)
@@ -563,7 +543,7 @@ fn main() -> Result<()> {
 
         println!(
             "  {} ({} players, shipped margin {shipped_margin})",
-            playlist.name,
+            playlist.name(),
             players.len()
         );
         for flagged_count in [shipped_count, shipped_count * 3 / 2] {

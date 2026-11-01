@@ -27,6 +27,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Parser;
 use feature_extractor::MATCH_STAT_COUNT;
+use replay_structs::Rank;
+use replay_structs::TeamSize;
 use skill_model::coaching::{COACHING_TIPS, CoachingTable, CoachingTables, tier_index};
 use skill_model::mechanics::{MECHANIC_HIGH_QUANTILE, MechanicTables, mechanics_above_lobby};
 use skill_model::{
@@ -83,68 +85,18 @@ struct Args {
 /// Largest prediction change allowed between the trained model and its on-disk form.
 const MAXIMUM_RELOAD_CHANGE_MMR: f32 = 0.5;
 
-/// Rank names for the coaching report, per tier index.
-const TIER_NAMES: [&str; 22] = [
-    "Bronze I",
-    "Bronze II",
-    "Bronze III",
-    "Silver I",
-    "Silver II",
-    "Silver III",
-    "Gold I",
-    "Gold II",
-    "Gold III",
-    "Platinum I",
-    "Platinum II",
-    "Platinum III",
-    "Diamond I",
-    "Diamond II",
-    "Diamond III",
-    "Champion I",
-    "Champion II",
-    "Champion III",
-    "Grand Champion I",
-    "Grand Champion II",
-    "Grand Champion III",
-    "Supersonic Legend",
-];
-
-/// Playlists by players per team, with their report name.
-const PLAYLISTS: [Playlist; 3] = [
-    Playlist {
-        players_per_team: 1,
-        name: "duels",
-    },
-    Playlist {
-        players_per_team: 2,
-        name: "doubles",
-    },
-    Playlist {
-        players_per_team: 3,
-        name: "standard",
-    },
-];
-
-/// One playlist size and its report name.
-struct Playlist {
-    players_per_team: usize,
-    name: &'static str,
-}
-
-impl Playlist {
-    /// Within-lobby metrics need this many rank-known players: the full lobby for duels and
-    /// doubles, [`MINIMUM_PLAYERS_PER_LOBBY`] for standard.
-    fn minimum_players_per_lobby(&self) -> usize {
-        MINIMUM_PLAYERS_PER_LOBBY.min(self.players_per_team * 2)
-    }
+/// Within-lobby metrics need this many rank-known players: the full lobby for duels and
+/// doubles, [`MINIMUM_PLAYERS_PER_LOBBY`] for standard.
+fn minimum_players_per_lobby(playlist: TeamSize) -> usize {
+    MINIMUM_PLAYERS_PER_LOBBY.min(playlist.players_per_team() * 2)
 }
 
 /// Metrics of each playlist present in `lobbies`.
 fn print_playlist_metrics(lobbies: &[Lobby], model: &skill_model::TabularSkillModel) {
-    for playlist in &PLAYLISTS {
+    for playlist in TeamSize::all() {
         let playlist_lobbies: Vec<Lobby> = lobbies
             .iter()
-            .filter(|lobby| lobby.players_per_team() == Some(playlist.players_per_team))
+            .filter(|lobby| lobby.players_per_team() == Some(playlist.players_per_team()))
             .cloned()
             .collect();
         let predictions: Vec<PlayerPrediction> = evaluate(&playlist_lobbies, model)
@@ -155,9 +107,9 @@ fn print_playlist_metrics(lobbies: &[Lobby], model: &skill_model::TabularSkillMo
             continue;
         }
         print_metrics(
-            &format!("evaluation {}", playlist.name),
+            &format!("evaluation {}", playlist.name()),
             &predictions,
-            playlist.minimum_players_per_lobby(),
+            minimum_players_per_lobby(playlist),
         );
     }
 }
@@ -170,7 +122,7 @@ fn print_smurf_report(
     plays_like_groups: &PlaysLikeGroups,
     mechanic_tables: &MechanicTables,
 ) {
-    for playlist in &PLAYLISTS {
+    for playlist in TeamSize::all() {
         let mut margins: Vec<f32> = Vec::new();
         let mut players = 0usize;
         let mut ranked_above = 0usize;
@@ -181,14 +133,14 @@ fn print_smurf_report(
         let mut flagged_positives = 0usize;
         for lobby in lobbies.iter().filter(|lobby| {
             lobby.partition == Partition::Evaluation
-                && lobby.players_per_team() == Some(playlist.players_per_team)
+                && lobby.players_per_team() == Some(playlist.players_per_team())
         }) {
             let stats = lobby.stat_references();
             let match_mmr = match_model.predict_stats(&stats);
             let plays_like = plays_like_groups.predict_stats(&stats);
             margins.extend(plays_like_margins(&match_mmr, &plays_like).iter().flatten());
             let mechanics = mechanics_above_lobby(
-                mechanic_tables.for_players_per_team(playlist.players_per_team),
+                mechanic_tables.for_players_per_team(playlist.players_per_team()),
                 &stats,
                 &match_mmr,
             );
@@ -196,7 +148,7 @@ fn print_smurf_report(
                 &match_mmr,
                 &plays_like,
                 &skill_model::SlotEvidence::per_slot(&mechanics, &stats),
-                playlist.players_per_team,
+                playlist.players_per_team(),
             );
             let mut labels: Vec<f32> = lobby
                 .labelled_slots()
@@ -236,7 +188,7 @@ fn print_smurf_report(
         }
         println!(
             "  {:<9} flags {:.2}% of players ({:.2}% ranked above the lobby, {:.2}% play above it, {:.2}% mechanics above it, {:.2}% deranking)  party positives caught {flagged_positives}/{positives}",
-            playlist.name,
+            playlist.name(),
             100.0 * (ranked_above + plays_above + mechanics_above + deranking) as f64
                 / players as f64,
             100.0 * ranked_above as f64 / players as f64,
@@ -259,7 +211,7 @@ fn print_smurf_report(
             .collect();
         println!(
             "            plays-above rate by weighted margin (shipped +{:.1}): {}",
-            smurf_margin_over_others_tiers(playlist.players_per_team),
+            smurf_margin_over_others_tiers(playlist.players_per_team()),
             rates.join("  ")
         );
     }
@@ -341,7 +293,7 @@ fn print_coaching_report(lobbies: &[Lobby], bundle: &SkillModelBundle) {
                 continue;
             };
             let group = (tier_index(*prediction) / 3).min(7);
-            let key = advice.tip.map_or("(nothing to fix)", |tip| tip.stat);
+            let key = advice.tip.map_or("(nothing to fix)", |tip| tip.stat.name());
             *counts[group].entry(key).or_default() += 1;
             if examples[group].is_none() && advice.tip.is_some() {
                 examples[group] = Some(advice.line(slot, "Player"));
@@ -375,12 +327,12 @@ fn print_coaching_report(lobbies: &[Lobby], bundle: &SkillModelBundle) {
 }
 
 fn print_all_enabled_tips(coaching: &CoachingTables) {
-    for (playlist, table) in PLAYLISTS.iter().zip(&coaching.by_players_per_team) {
+    for (playlist, table) in TeamSize::all().zip(&coaching.by_players_per_team) {
         if table.tiers.is_empty() {
-            println!("  {}: no training data", playlist.name);
+            println!("  {}: no training data", playlist.name());
             continue;
         }
-        println!("  {}:", playlist.name);
+        println!("  {}:", playlist.name());
         print_enabled_tips(table);
     }
 }
@@ -390,7 +342,7 @@ fn print_enabled_tips(coaching: &CoachingTable) {
         .iter()
         .zip(&coaching.enabled)
         .filter(|(_, enabled)| !**enabled)
-        .map(|(tip, _)| tip.stat)
+        .map(|(tip, _)| tip.stat.name())
         .collect();
     if disabled.is_empty() {
         println!("  all {} tips agree with the data", COACHING_TIPS.len());
@@ -402,9 +354,9 @@ fn print_enabled_tips(coaching: &CoachingTable) {
             println!(
                 "    {:<36} {} median {:.3} → {} median {:.3}",
                 tip.stat,
-                TIER_NAMES[0],
+                Rank::Bronze1.display_name(),
                 bronze.medians.get(tip_index).copied().unwrap_or(0.0),
-                TIER_NAMES[15],
+                Rank::Champion1.display_name(),
                 champion.medians.get(tip_index).copied().unwrap_or(0.0),
             );
         }

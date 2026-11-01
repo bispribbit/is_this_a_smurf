@@ -19,11 +19,10 @@
 //!
 //! Prediction = lobby level + `deviation_scale` × centred deviation, floored at 0 MMR.
 
-use feature_extractor::{MATCH_STAT_COUNT, PlayerMatchStats, SLOTS_PER_TEAM, TOTAL_SLOTS};
+use feature_extractor::{
+    MATCH_STAT_COUNT, MatchStat, PlayerMatchStats, SLOTS_PER_TEAM, TOTAL_SLOTS,
+};
 use serde::{Deserialize, Serialize};
-
-/// Index of `goals` in [`feature_extractor::MATCH_STAT_NAMES`], used for team goal difference.
-const GOALS_STAT: usize = 33;
 
 /// One node of a frozen regression tree.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -98,7 +97,7 @@ pub struct TabularLayout {
     pub lobby_mean: bool,
     /// Own − own-team mean, own-team mean − opponent mean, and team goal difference.
     pub team_context: bool,
-    /// Stat indices kept, into [`feature_extractor::MATCH_STAT_NAMES`].
+    /// Stat row indices kept ([`MatchStat::index`]).
     pub stats: Vec<usize>,
 }
 
@@ -133,7 +132,7 @@ impl LobbySummary {
                     team_mean[team][index] += value / members.len() as f32;
                     mean[index] += value / present;
                 }
-                team_goals[team] += member[GOALS_STAT];
+                team_goals[team] += member[MatchStat::Goals.index()];
             }
         }
         Self {
@@ -183,10 +182,7 @@ impl TabularLayout {
     pub fn column_names(&self) -> Vec<String> {
         let mut names = Vec::new();
         for &stat in &self.stats {
-            let name = feature_extractor::MATCH_STAT_NAMES
-                .get(stat)
-                .copied()
-                .unwrap_or("?");
+            let name = MatchStat::from_index(stat).map_or("?", MatchStat::name);
             if self.own {
                 names.push(format!("own:{name}"));
             }
@@ -199,10 +195,7 @@ impl TabularLayout {
         }
         if self.team_context {
             for &stat in &self.stats {
-                let name = feature_extractor::MATCH_STAT_NAMES
-                    .get(stat)
-                    .copied()
-                    .unwrap_or("?");
+                let name = MatchStat::from_index(stat).map_or("?", MatchStat::name);
                 names.push(format!("vs_team:{name}"));
                 names.push(format!("team_vs_opp:{name}"));
             }
@@ -237,8 +230,8 @@ impl TabularSkillModel {
             && self
                 .stat_names
                 .iter()
-                .zip(feature_extractor::MATCH_STAT_NAMES)
-                .all(|(trained, current)| trained == current)
+                .zip(MatchStat::all())
+                .all(|(trained, current)| trained == current.name())
     }
 
     /// Predicts every present slot from raw stat arrays. Absent slots are `None`.
@@ -296,53 +289,56 @@ impl TabularSkillModel {
 /// scoreboard, kickoffs, demos and the situational positioning stats all look different
 /// when a smurf has the ball in the other half all game: in a duel they are a split with
 /// one opponent. `players_per_team` stays so the trees know the playlist.
-pub const OPPONENT_INDEPENDENT_STATS: &[&str] = &[
-    "mean_speed",
-    "supersonic_fraction",
-    "slow_fraction",
-    "ground_fraction",
-    "low_air_fraction",
-    "high_air_fraction",
-    "wall_fraction",
-    "mean_height",
-    "jumps_per_minute",
-    "mean_boost",
-    "boost_empty_fraction",
-    "boost_full_fraction",
-    "boost_collected_per_minute",
-    "boost_used_per_minute",
-    "big_pads_per_minute",
-    "small_pads_per_minute",
-    "boost_while_supersonic_fraction",
-    "mean_ball_speed_after_touch",
-    "aerial_touch_fraction",
-    "mean_touch_speed_gain",
-    "airborne_upright_fraction",
-    "slow_with_boost_fraction",
-    "supersonic_per_boost",
-    "jumps_pressed_per_minute",
-    "double_jumps_per_minute",
-    "dodges_per_minute",
-    "wavedash_like_dodges_per_minute",
-    "aerial_dodges_per_minute",
-    "pitch_positive_dodge_fraction",
-    "pitch_negative_dodge_fraction",
-    "roll_dodge_fraction",
-    "diagonal_dodge_fraction",
-    "fast_dodge_fraction",
-    "boosting_fraction",
-    "powerslide_fraction",
-    "air_roll_fraction",
-    "reverse_fraction",
-    "mean_absolute_steer",
-    "mean_air_angular_speed",
-    "fast_aerial_fraction",
-    "speed_flips_per_minute",
-    "half_flips_per_minute",
-    "wavedashes_per_minute",
-    "flip_resets_per_minute",
-    "ceiling_touches_per_minute",
-    "players_per_team",
+pub const OPPONENT_INDEPENDENT_STATS: &[MatchStat] = &[
+    MatchStat::MeanSpeed,
+    MatchStat::SupersonicFraction,
+    MatchStat::SlowFraction,
+    MatchStat::GroundFraction,
+    MatchStat::LowAirFraction,
+    MatchStat::HighAirFraction,
+    MatchStat::WallFraction,
+    MatchStat::MeanHeight,
+    MatchStat::JumpsPerMinute,
+    MatchStat::MeanBoost,
+    MatchStat::BoostEmptyFraction,
+    MatchStat::BoostFullFraction,
+    MatchStat::BoostCollectedPerMinute,
+    MatchStat::BoostUsedPerMinute,
+    MatchStat::BigPadsPerMinute,
+    MatchStat::SmallPadsPerMinute,
+    MatchStat::BoostWhileSupersonicFraction,
+    MatchStat::MeanBallSpeedAfterTouch,
+    MatchStat::AerialTouchFraction,
+    MatchStat::MeanTouchSpeedGain,
+    MatchStat::AirborneUprightFraction,
+    MatchStat::CleanLandingFraction,
+    MatchStat::LandingSpeedKeptFraction,
+    MatchStat::SlowWithBoostFraction,
+    MatchStat::SupersonicPerBoost,
+    MatchStat::JumpsPressedPerMinute,
+    MatchStat::DoubleJumpsPerMinute,
+    MatchStat::DodgesPerMinute,
+    MatchStat::WavedashLikeDodgesPerMinute,
+    MatchStat::AerialDodgesPerMinute,
+    MatchStat::PitchPositiveDodgeFraction,
+    MatchStat::PitchNegativeDodgeFraction,
+    MatchStat::RollDodgeFraction,
+    MatchStat::DiagonalDodgeFraction,
+    MatchStat::FastDodgeFraction,
+    MatchStat::BoostingFraction,
+    MatchStat::PowerslideFraction,
+    MatchStat::AirRollFraction,
+    MatchStat::ReverseFraction,
+    MatchStat::MeanAbsoluteSteer,
+    MatchStat::MeanAirAngularSpeed,
+    MatchStat::FastAerialFraction,
+    MatchStat::SpeedFlipsPerMinute,
+    MatchStat::HalfFlipsPerMinute,
+    MatchStat::WavedashesPerMinute,
+    MatchStat::TornadoSpinsPerMinute,
+    MatchStat::FlipResetsPerMinute,
+    MatchStat::CeilingTouchesPerMinute,
+    MatchStat::PlayersPerTeam,
 ];
 
 /// Predicts each player's MMR from their own stats only: the rank they *play like*,
@@ -379,11 +375,7 @@ impl PlaysLikeModel {
         TabularLayout {
             stats: OPPONENT_INDEPENDENT_STATS
                 .iter()
-                .filter_map(|name| {
-                    feature_extractor::MATCH_STAT_NAMES
-                        .iter()
-                        .position(|stat| stat == name)
-                })
+                .map(|stat| stat.index())
                 .collect(),
             ..Self::own_stats_layout()
         }
@@ -459,10 +451,7 @@ mod tests {
             stats: vec![0],
         };
         let model = TabularSkillModel {
-            stat_names: feature_extractor::MATCH_STAT_NAMES
-                .iter()
-                .map(ToString::to_string)
-                .collect(),
+            stat_names: MatchStat::all().map(|stat| stat.to_string()).collect(),
             absolute_layout: layout.clone(),
             absolute: FrozenEnsemble {
                 base_prediction: 1000.0,

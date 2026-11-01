@@ -17,13 +17,14 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use feature_extractor::MatchStat;
+use replay_structs::Rank;
+use replay_structs::TeamSize;
 use skill_model::coaching::tier_index;
 use skill_model::mechanics::mechanics_above_lobby;
 use skill_model::{SkillModelBundle, smurf_suspicions};
 use skill_model_training::dataset::{Lobby, Partition, read_lobbies};
-use skill_model_training::smurf_references::{
-    TIER_NAMES, median, stat_index, team_goal_difference,
-};
+use skill_model_training::smurf_references::{median, team_goal_difference};
 use uuid::Uuid;
 
 #[derive(Parser, Debug)]
@@ -44,40 +45,19 @@ struct Args {
     examples: usize,
 }
 
-/// One playlist size and its report name.
-struct Playlist {
-    players_per_team: usize,
-    name: &'static str,
-}
-
-const PLAYLISTS: [Playlist; 3] = [
-    Playlist {
-        players_per_team: 1,
-        name: "duels",
-    },
-    Playlist {
-        players_per_team: 2,
-        name: "doubles",
-    },
-    Playlist {
-        players_per_team: 3,
-        name: "standard",
-    },
-];
-
 /// Fast aerials first, as the reference the others are compared with.
-const MECHANICS: [&str; 11] = [
-    "fast_aerial_fraction",
-    "speed_flips_per_minute",
-    "half_flips_per_minute",
-    "wavedashes_per_minute",
-    "flip_resets_per_minute",
-    "ceiling_touches_per_minute",
-    "air_dribble_touches_per_minute",
-    "double_taps_per_minute",
-    "power_shots_per_minute",
-    "fifty_fifties_per_minute",
-    "demos_inflicted",
+const MECHANICS: [MatchStat; 11] = [
+    MatchStat::FastAerialFraction,
+    MatchStat::SpeedFlipsPerMinute,
+    MatchStat::HalfFlipsPerMinute,
+    MatchStat::WavedashesPerMinute,
+    MatchStat::FlipResetsPerMinute,
+    MatchStat::CeilingTouchesPerMinute,
+    MatchStat::AirDribbleTouchesPerMinute,
+    MatchStat::DoubleTapsPerMinute,
+    MatchStat::PowerShotsPerMinute,
+    MatchStat::FiftyFiftiesPerMinute,
+    MatchStat::DemosInflicted,
 ];
 
 /// Highest tier counted as low rank (Gold II).
@@ -101,7 +81,7 @@ struct Player {
 
 fn reference_rates(lobbies: &[&Lobby]) -> [f32; MECHANICS.len()] {
     core::array::from_fn(|index| {
-        let stat = stat_index(MECHANICS[index]);
+        let stat = MECHANICS[index].index();
         let mut values: Vec<f32> = lobbies
             .iter()
             .filter(|lobby| lobby.partition != Partition::Evaluation)
@@ -150,7 +130,7 @@ fn players(
                 goal_difference: team_goal_difference(lobby, slot),
                 // A Champion I median of zero (flip resets) means "did it at all".
                 at_reference: core::array::from_fn(|index| {
-                    let value = values[stat_index(MECHANICS[index])];
+                    let value = values[MECHANICS[index].index()];
                     value > 0.0 && value >= reference[index]
                 }),
             });
@@ -163,7 +143,7 @@ fn share(count: usize, total: usize) -> f64 {
     100.0 * count as f64 / total.max(1) as f64
 }
 
-fn print_playlist(playlist: &Playlist, players: &[Player], reference: &[f32], args: &Args) {
+fn print_playlist(playlist: TeamSize, players: &[Player], reference: &[f32], args: &Args) {
     let low: Vec<&Player> = players
         .iter()
         .filter(|player| player.tier <= LOW_RANK_MAXIMUM_TIER)
@@ -175,7 +155,7 @@ fn print_playlist(playlist: &Playlist, players: &[Player], reference: &[f32], ar
     let low_evaluation: Vec<&Player> = low.iter().copied().filter(|p| p.evaluation).collect();
     println!(
         "== {} ({} players labelled Gold II or lower, {} of them in the evaluation split)",
-        playlist.name,
+        playlist.name(),
         low.len(),
         low_evaluation.len()
     );
@@ -240,13 +220,13 @@ fn print_playlist(playlist: &Playlist, players: &[Player], reference: &[f32], ar
             .iter()
             .zip(player.at_reference)
             .filter(|(_, hit)| *hit)
-            .map(|(name, _)| *name)
+            .map(|(stat, _)| stat.name())
             .collect();
         println!(
             "    {} slot {}  label {:<3}  goal difference {:+.0}  {}  {}",
             player.replay_id,
             player.slot,
-            TIER_NAMES[player.tier],
+            Rank::from_tier_index(player.tier).short_name(),
             player.goal_difference,
             if player.flagged {
                 "FLAGGED"
@@ -266,17 +246,17 @@ fn main() -> Result<()> {
     )
     .map_err(|error| anyhow::anyhow!("decoding bundle: {error}"))?;
     let lobbies = read_lobbies(&args.match_stats)?;
-    for playlist in &PLAYLISTS {
+    for playlist in TeamSize::all() {
         let playlist_lobbies: Vec<&Lobby> = lobbies
             .iter()
-            .filter(|lobby| lobby.players_per_team() == Some(playlist.players_per_team))
+            .filter(|lobby| lobby.players_per_team() == Some(playlist.players_per_team()))
             .collect();
         let reference = reference_rates(&playlist_lobbies);
         let players = players(
             &playlist_lobbies,
             &reference,
             &bundle,
-            playlist.players_per_team,
+            playlist.players_per_team(),
         );
         print_playlist(playlist, &players, &reference, &args);
     }

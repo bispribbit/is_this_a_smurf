@@ -187,16 +187,17 @@ impl CleaningCounts {
                 100.0 * *dropped as f64 / (*labelled).max(1) as f64
             );
         }
-        const TIER_NAMES: [&str; 22] = [
-            "B1", "B2", "B3", "S1", "S2", "S3", "G1", "G2", "G3", "P1", "P2", "P3", "D1", "D2",
-            "D3", "C1", "C2", "C3", "GC1", "GC2", "GC3", "SSL",
-        ];
         let by_tier: Vec<String> = self
             .dropped_by_tier
             .iter()
-            .zip(TIER_NAMES)
-            .filter(|(count, _)| **count > 0)
-            .map(|(count, name)| format!("{name} {count}"))
+            .enumerate()
+            .filter(|(_, count)| **count > 0)
+            .map(|(tier, count)| {
+                format!(
+                    "{} {count}",
+                    replay_structs::Rank::from_tier_index(tier).short_name()
+                )
+            })
             .collect();
         println!("  dropped by label tier: {}", by_tier.join(", "));
     }

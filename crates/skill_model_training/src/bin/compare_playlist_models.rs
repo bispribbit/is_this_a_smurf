@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::Parser;
 use feature_extractor::MATCH_STAT_COUNT;
+use replay_structs::TeamSize;
 use skill_model::{TabularLayout, TabularSkillModel};
 use skill_model_training::dataset::{Lobby, evaluate, read_lobbies, train_model};
 use skill_model_training::evaluation::{
@@ -30,27 +31,6 @@ struct Args {
     #[arg(long, value_delimiter = ',', default_value = "1,2,3")]
     seeds: Vec<u64>,
 }
-
-/// One playlist size and its report name.
-struct Playlist {
-    players_per_team: usize,
-    name: &'static str,
-}
-
-const PLAYLISTS: [Playlist; 3] = [
-    Playlist {
-        players_per_team: 1,
-        name: "duels",
-    },
-    Playlist {
-        players_per_team: 2,
-        name: "doubles",
-    },
-    Playlist {
-        players_per_team: 3,
-        name: "standard",
-    },
-];
 
 /// Metrics of one arm on one playlist, one entry per seed.
 #[derive(Default)]
@@ -130,16 +110,14 @@ fn main() -> Result<()> {
         team_context: true,
         stats: (0..MATCH_STAT_COUNT).collect(),
     };
-    let by_playlist: Vec<Vec<Lobby>> = PLAYLISTS
-        .iter()
-        .map(|playlist| playlist_lobbies(&lobbies, playlist.players_per_team))
+    let by_playlist: Vec<Vec<Lobby>> = TeamSize::all()
+        .map(|playlist| playlist_lobbies(&lobbies, playlist.players_per_team()))
         .collect();
-    for (playlist, playlist_lobbies) in PLAYLISTS.iter().zip(&by_playlist) {
-        println!("{}: {} replays", playlist.name, playlist_lobbies.len());
+    for (playlist, playlist_lobbies) in TeamSize::all().zip(&by_playlist) {
+        println!("{}: {} replays", playlist.name(), playlist_lobbies.len());
     }
 
-    let mut results: Vec<PlaylistResults> = PLAYLISTS
-        .iter()
+    let mut results: Vec<PlaylistResults> = TeamSize::all()
         .map(|_| PlaylistResults::default())
         .collect();
     for &seed in &args.seeds {
@@ -150,21 +128,21 @@ fn main() -> Result<()> {
         println!("seed {seed}: joint model");
         let joint = train_model(&lobbies, &layout, &config);
         for ((playlist, playlist_lobbies), result) in
-            PLAYLISTS.iter().zip(&by_playlist).zip(&mut results)
+            TeamSize::all().zip(&by_playlist).zip(&mut results)
         {
             if playlist_lobbies.is_empty() {
                 continue;
             }
-            println!("seed {seed}: {} model", playlist.name);
+            println!("seed {seed}: {} model", playlist.name());
             let separate = train_model(playlist_lobbies, &layout, &config);
             result
                 .joint
                 .runs
-                .push(score(playlist_lobbies, &joint, playlist.players_per_team));
+                .push(score(playlist_lobbies, &joint, playlist.players_per_team()));
             result.separate.runs.push(score(
                 playlist_lobbies,
                 &separate,
-                playlist.players_per_team,
+                playlist.players_per_team(),
             ));
         }
     }
@@ -173,13 +151,15 @@ fn main() -> Result<()> {
         "\nEvaluation split, mean over {} seeds (± half the seed range):",
         args.seeds.len()
     );
-    for (playlist, result) in PLAYLISTS.iter().zip(&results) {
+    for (playlist, result) in TeamSize::all().zip(&results) {
         let Some(first) = result.joint.runs.first() else {
             continue;
         };
         println!(
             "  {} ({} lobbies, {} players)",
-            playlist.name, first.lobby_count, first.player_count
+            playlist.name(),
+            first.lobby_count,
+            first.player_count
         );
         print_arm("joint", &result.joint);
         print_arm("separate", &result.separate);

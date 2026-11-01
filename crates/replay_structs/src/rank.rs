@@ -1112,34 +1112,108 @@ impl Rank {
         }
     }
 
+    /// Short name for tables, e.g. "B1", "GC3", "SSL".
+    #[must_use]
+    pub const fn short_name(self) -> &'static str {
+        match self {
+            Self::Unranked => "-",
+            Self::Bronze1 => "B1",
+            Self::Bronze2 => "B2",
+            Self::Bronze3 => "B3",
+            Self::Silver1 => "S1",
+            Self::Silver2 => "S2",
+            Self::Silver3 => "S3",
+            Self::Gold1 => "G1",
+            Self::Gold2 => "G2",
+            Self::Gold3 => "G3",
+            Self::Platinum1 => "P1",
+            Self::Platinum2 => "P2",
+            Self::Platinum3 => "P3",
+            Self::Diamond1 => "D1",
+            Self::Diamond2 => "D2",
+            Self::Diamond3 => "D3",
+            Self::Champion1 => "C1",
+            Self::Champion2 => "C2",
+            Self::Champion3 => "C3",
+            Self::GrandChampion1 => "GC1",
+            Self::GrandChampion2 => "GC2",
+            Self::GrandChampion3 => "GC3",
+            Self::SupersonicLegend => "SSL",
+        }
+    }
+
+    /// Display name, e.g. "Gold III", "Champ I", "GC II", "SSL".
+    #[must_use]
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::Unranked => "Unranked",
+            Self::Bronze1 => "Bronze I",
+            Self::Bronze2 => "Bronze II",
+            Self::Bronze3 => "Bronze III",
+            Self::Silver1 => "Silver I",
+            Self::Silver2 => "Silver II",
+            Self::Silver3 => "Silver III",
+            Self::Gold1 => "Gold I",
+            Self::Gold2 => "Gold II",
+            Self::Gold3 => "Gold III",
+            Self::Platinum1 => "Platinum I",
+            Self::Platinum2 => "Platinum II",
+            Self::Platinum3 => "Platinum III",
+            Self::Diamond1 => "Diamond I",
+            Self::Diamond2 => "Diamond II",
+            Self::Diamond3 => "Diamond III",
+            Self::Champion1 => "Champ I",
+            Self::Champion2 => "Champ II",
+            Self::Champion3 => "Champ III",
+            Self::GrandChampion1 => "GC I",
+            Self::GrandChampion2 => "GC II",
+            Self::GrandChampion3 => "GC III",
+            Self::SupersonicLegend => "SSL",
+        }
+    }
+
+    /// Plural display name, e.g. "Gold IIIs", "SSLs".
+    #[must_use]
+    pub const fn plural_name(self) -> &'static str {
+        match self {
+            Self::Unranked => "Unranked",
+            Self::Bronze1 => "Bronze Is",
+            Self::Bronze2 => "Bronze IIs",
+            Self::Bronze3 => "Bronze IIIs",
+            Self::Silver1 => "Silver Is",
+            Self::Silver2 => "Silver IIs",
+            Self::Silver3 => "Silver IIIs",
+            Self::Gold1 => "Gold Is",
+            Self::Gold2 => "Gold IIs",
+            Self::Gold3 => "Gold IIIs",
+            Self::Platinum1 => "Platinum Is",
+            Self::Platinum2 => "Platinum IIs",
+            Self::Platinum3 => "Platinum IIIs",
+            Self::Diamond1 => "Diamond Is",
+            Self::Diamond2 => "Diamond IIs",
+            Self::Diamond3 => "Diamond IIIs",
+            Self::Champion1 => "Champ Is",
+            Self::Champion2 => "Champ IIs",
+            Self::Champion3 => "Champ IIIs",
+            Self::GrandChampion1 => "GC Is",
+            Self::GrandChampion2 => "GC IIs",
+            Self::GrandChampion3 => "GC IIIs",
+            Self::SupersonicLegend => "SSLs",
+        }
+    }
+
+    /// The ranked tier at `tier` (0 = Bronze I … 21 = SSL), saturating at SSL.
+    #[must_use]
+    pub fn from_tier_index(tier: usize) -> Self {
+        Self::from_numeric_index_saturating(
+            i32::try_from(tier).unwrap_or(i32::MAX).saturating_add(1),
+        )
+    }
+
     /// Returns the folder name for storing replays of this rank.
     #[must_use]
     pub const fn as_folder_name(self) -> &'static str {
-        match self {
-            Self::Unranked => "unranked",
-            Self::Bronze1 => "bronze-1",
-            Self::Bronze2 => "bronze-2",
-            Self::Bronze3 => "bronze-3",
-            Self::Silver1 => "silver-1",
-            Self::Silver2 => "silver-2",
-            Self::Silver3 => "silver-3",
-            Self::Gold1 => "gold-1",
-            Self::Gold2 => "gold-2",
-            Self::Gold3 => "gold-3",
-            Self::Platinum1 => "platinum-1",
-            Self::Platinum2 => "platinum-2",
-            Self::Platinum3 => "platinum-3",
-            Self::Diamond1 => "diamond-1",
-            Self::Diamond2 => "diamond-2",
-            Self::Diamond3 => "diamond-3",
-            Self::Champion1 => "champion-1",
-            Self::Champion2 => "champion-2",
-            Self::Champion3 => "champion-3",
-            Self::GrandChampion1 => "grand-champion-1",
-            Self::GrandChampion2 => "grand-champion-2",
-            Self::GrandChampion3 => "grand-champion-3",
-            Self::SupersonicLegend => "supersonic-legend",
-        }
+        self.as_api_string()
     }
 
     /// Returns an iterator over all ranked tiers (excluding unranked).

@@ -47,13 +47,9 @@ pub fn build_mechanic_tables(lobbies: &[Lobby], high_quantile: f32) -> MechanicT
 }
 
 fn build_mechanic_table(lobbies: &[&Lobby], high_quantile: f32) -> MechanicTable {
-    let columns: Vec<Option<usize>> = MECHANICS
+    let columns: Vec<usize> = MECHANICS
         .iter()
-        .map(|mechanic| {
-            feature_extractor::MATCH_STAT_NAMES
-                .iter()
-                .position(|name| *name == mechanic.stat)
-        })
+        .map(|mechanic| mechanic.stat.index())
         .collect();
     // values[tier][mechanic] = every labelled player's rate.
     let mut values: Vec<Vec<Vec<f32>>> = vec![vec![Vec::new(); MECHANICS.len()]; TIER_COUNT];
@@ -67,7 +63,7 @@ fn build_mechanic_table(lobbies: &[&Lobby], high_quantile: f32) -> MechanicTable
             };
             let tier_values = &mut values[tier_index(lobby.targets[slot])];
             for (mechanic_values, column) in tier_values.iter_mut().zip(&columns) {
-                if let Some(value) = column.and_then(|column| stats.get(column)) {
+                if let Some(value) = stats.get(*column) {
                     mechanic_values.push(*value);
                 }
             }

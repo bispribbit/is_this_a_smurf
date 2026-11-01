@@ -6,7 +6,7 @@
 //! group estimates rank (1 / RMSE²). At the same flag rate this caught more smurfs in every
 //! playlist and put far fewer flags on Diamond-and-up players (`docs/model.md`).
 
-use feature_extractor::{MATCH_STAT_COUNT, MATCH_STAT_NAMES, PlayerMatchStats, TOTAL_SLOTS};
+use feature_extractor::{MATCH_STAT_COUNT, MatchStat, PlayerMatchStats, TOTAL_SLOTS};
 
 use crate::model::{PlaysLikeModel, TabularLayout};
 
@@ -14,7 +14,7 @@ use crate::model::{PlaysLikeModel, TabularLayout};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StatGroup {
     pub name: &'static str,
-    pub stats: &'static [&'static str],
+    pub stats: &'static [MatchStat],
 }
 
 impl StatGroup {
@@ -25,8 +25,8 @@ impl StatGroup {
             stats: self
                 .stats
                 .iter()
-                .chain(&["players_per_team"])
-                .filter_map(|name| MATCH_STAT_NAMES.iter().position(|stat| stat == name))
+                .chain(&[MatchStat::PlayersPerTeam])
+                .map(|stat| stat.index())
                 .collect(),
             ..PlaysLikeModel::own_stats_layout()
         }
@@ -39,80 +39,83 @@ pub const STAT_GROUPS: [StatGroup; 4] = [
     StatGroup {
         name: "aerial",
         stats: &[
-            "low_air_fraction",
-            "high_air_fraction",
-            "wall_fraction",
-            "mean_height",
-            "aerial_touch_fraction",
-            "airborne_upright_fraction",
-            "aerial_dodges_per_minute",
-            "air_roll_fraction",
-            "mean_air_angular_speed",
-            "fast_aerial_fraction",
-            "double_jumps_per_minute",
+            MatchStat::LowAirFraction,
+            MatchStat::HighAirFraction,
+            MatchStat::WallFraction,
+            MatchStat::MeanHeight,
+            MatchStat::AerialTouchFraction,
+            MatchStat::AirborneUprightFraction,
+            MatchStat::CleanLandingFraction,
+            MatchStat::LandingSpeedKeptFraction,
+            MatchStat::AerialDodgesPerMinute,
+            MatchStat::AirRollFraction,
+            MatchStat::MeanAirAngularSpeed,
+            MatchStat::FastAerialFraction,
+            MatchStat::DoubleJumpsPerMinute,
         ],
     },
     StatGroup {
         name: "ground and flips",
         stats: &[
-            "ground_fraction",
-            "jumps_per_minute",
-            "jumps_pressed_per_minute",
-            "dodges_per_minute",
-            "wavedash_like_dodges_per_minute",
-            "pitch_positive_dodge_fraction",
-            "pitch_negative_dodge_fraction",
-            "roll_dodge_fraction",
-            "diagonal_dodge_fraction",
-            "fast_dodge_fraction",
-            "powerslide_fraction",
-            "reverse_fraction",
-            "mean_absolute_steer",
-            "mean_ball_speed_after_touch",
-            "mean_touch_speed_gain",
+            MatchStat::GroundFraction,
+            MatchStat::JumpsPerMinute,
+            MatchStat::JumpsPressedPerMinute,
+            MatchStat::DodgesPerMinute,
+            MatchStat::WavedashLikeDodgesPerMinute,
+            MatchStat::PitchPositiveDodgeFraction,
+            MatchStat::PitchNegativeDodgeFraction,
+            MatchStat::RollDodgeFraction,
+            MatchStat::DiagonalDodgeFraction,
+            MatchStat::FastDodgeFraction,
+            MatchStat::PowerslideFraction,
+            MatchStat::ReverseFraction,
+            MatchStat::MeanAbsoluteSteer,
+            MatchStat::MeanBallSpeedAfterTouch,
+            MatchStat::MeanTouchSpeedGain,
         ],
     },
     StatGroup {
         name: "speed and boost",
         stats: &[
-            "mean_speed",
-            "supersonic_fraction",
-            "slow_fraction",
-            "mean_boost",
-            "boost_empty_fraction",
-            "boost_full_fraction",
-            "boost_collected_per_minute",
-            "boost_used_per_minute",
-            "big_pads_per_minute",
-            "small_pads_per_minute",
-            "boost_while_supersonic_fraction",
-            "slow_with_boost_fraction",
-            "supersonic_per_boost",
-            "boosting_fraction",
+            MatchStat::MeanSpeed,
+            MatchStat::SupersonicFraction,
+            MatchStat::SlowFraction,
+            MatchStat::MeanBoost,
+            MatchStat::BoostEmptyFraction,
+            MatchStat::BoostFullFraction,
+            MatchStat::BoostCollectedPerMinute,
+            MatchStat::BoostUsedPerMinute,
+            MatchStat::BigPadsPerMinute,
+            MatchStat::SmallPadsPerMinute,
+            MatchStat::BoostWhileSupersonicFraction,
+            MatchStat::SlowWithBoostFraction,
+            MatchStat::SupersonicPerBoost,
+            MatchStat::BoostingFraction,
         ],
     },
     StatGroup {
         name: "named mechanics",
         stats: &[
-            "speed_flips_per_minute",
-            "half_flips_per_minute",
-            "wavedashes_per_minute",
-            "flip_resets_per_minute",
-            "ceiling_touches_per_minute",
-            "dribble_fraction",
-            "flicks_per_minute",
-            "air_dribble_touches_per_minute",
-            "double_taps_per_minute",
-            "wall_touch_fraction",
-            "flip_touch_fraction",
-            "power_shots_per_minute",
-            "fifty_fifties_per_minute",
-            "fifty_fifty_win_fraction",
-            "bumps_inflicted_per_minute",
-            "bumps_received_per_minute",
-            "teammate_bumps_per_minute",
-            "demos_inflicted",
-            "demos_received",
+            MatchStat::SpeedFlipsPerMinute,
+            MatchStat::HalfFlipsPerMinute,
+            MatchStat::WavedashesPerMinute,
+            MatchStat::TornadoSpinsPerMinute,
+            MatchStat::FlipResetsPerMinute,
+            MatchStat::CeilingTouchesPerMinute,
+            MatchStat::DribbleFraction,
+            MatchStat::FlicksPerMinute,
+            MatchStat::AirDribbleTouchesPerMinute,
+            MatchStat::DoubleTapsPerMinute,
+            MatchStat::WallTouchFraction,
+            MatchStat::FlipTouchFraction,
+            MatchStat::PowerShotsPerMinute,
+            MatchStat::FiftyFiftiesPerMinute,
+            MatchStat::FiftyFiftyWinFraction,
+            MatchStat::BumpsInflictedPerMinute,
+            MatchStat::BumpsReceivedPerMinute,
+            MatchStat::TeammateBumpsPerMinute,
+            MatchStat::DemosInflicted,
+            MatchStat::DemosReceived,
         ],
     },
 ];

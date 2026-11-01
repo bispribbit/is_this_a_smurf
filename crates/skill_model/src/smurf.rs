@@ -27,7 +27,7 @@
 //!
 //! `docs/model.md` has how the margins were chosen.
 
-use feature_extractor::{MATCH_STAT_COUNT, MATCH_STAT_NAMES, TOTAL_SLOTS};
+use feature_extractor::{MATCH_STAT_COUNT, MatchStat, TOTAL_SLOTS};
 
 use crate::coaching::tier_index;
 use crate::mechanics::MechanicEvidence;
@@ -81,17 +81,13 @@ impl SlotEvidence {
         mechanics: &[Vec<MechanicEvidence>; TOTAL_SLOTS],
         players: &[Option<&[f32; MATCH_STAT_COUNT]>; TOTAL_SLOTS],
     ) -> [Self; TOTAL_SLOTS] {
-        let forfeited = MATCH_STAT_NAMES
-            .iter()
-            .position(|name| *name == "forfeited_level_or_ahead");
         core::array::from_fn(|slot| Self {
             mechanics_above: mechanics.get(slot).map_or(0, Vec::len),
             forfeited_level_or_ahead: players
                 .get(slot)
                 .copied()
                 .flatten()
-                .zip(forfeited)
-                .and_then(|found| found.0.get(found.1).copied())
+                .and_then(|stats| stats.get(MatchStat::ForfeitedLevelOrAhead.index()).copied())
                 .is_some_and(|value| value > 0.0),
         })
     }

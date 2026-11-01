@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::Parser;
 use feature_extractor::MATCH_STAT_COUNT;
+use replay_structs::TeamSize;
 use skill_model::{PlaysLikeModel, TabularLayout, TabularSkillModel};
 use skill_model_training::account_cleaning::{
     AccountCleaning, AccountId, AccountIds, clean_labels_by_account,
@@ -42,27 +43,6 @@ struct Args {
     #[arg(long, value_delimiter = ',', default_value = "1,2,3")]
     seeds: Vec<u64>,
 }
-
-/// One playlist size and its report name.
-struct Playlist {
-    players_per_team: usize,
-    name: &'static str,
-}
-
-const PLAYLISTS: [Playlist; 3] = [
-    Playlist {
-        players_per_team: 1,
-        name: "duels",
-    },
-    Playlist {
-        players_per_team: 2,
-        name: "doubles",
-    },
-    Playlist {
-        players_per_team: 3,
-        name: "standard",
-    },
-];
 
 /// One cleaning variant and its results.
 struct Variant {
@@ -151,12 +131,12 @@ fn print_leakage(lobbies: &[Lobby], model: &TabularSkillModel, accounts: &Accoun
         })
         .copied()
         .collect();
-    for playlist in &PLAYLISTS {
+    for playlist in TeamSize::all() {
         let mut seen = Vec::new();
         let mut unseen = Vec::new();
         for lobby in lobbies.iter().filter(|lobby| {
             lobby.partition == Partition::Evaluation
-                && lobby.players_per_team() == Some(playlist.players_per_team)
+                && lobby.players_per_team() == Some(playlist.players_per_team())
         }) {
             let predictions = model.predict_stats(&lobby.stat_references());
             for slot in lobby.labelled_slots() {
@@ -179,7 +159,7 @@ fn print_leakage(lobbies: &[Lobby], model: &TabularSkillModel, accounts: &Accoun
         }
         println!(
             "    {:<9} player RMSE: account also in training {:.0} ({} players), unseen {:.0} ({} players)",
-            playlist.name,
+            playlist.name(),
             rmse(&seen),
             seen.len(),
             rmse(&unseen),
@@ -213,7 +193,7 @@ fn main() -> Result<()> {
     let mut variants = vec![Variant {
         name: "per game".to_owned(),
         cleaned: per_game,
-        runs_by_playlist: PLAYLISTS.iter().map(|_| Vec::new()).collect(),
+        runs_by_playlist: TeamSize::all().map(|_| Vec::new()).collect(),
     }];
     for minimum_games in [2, 3] {
         variants.push(Variant {
@@ -227,7 +207,7 @@ fn main() -> Result<()> {
                     minimum_games,
                 },
             ),
-            runs_by_playlist: PLAYLISTS.iter().map(|_| Vec::new()).collect(),
+            runs_by_playlist: TeamSize::all().map(|_| Vec::new()).collect(),
         });
     }
     for variant in &variants {
@@ -264,9 +244,13 @@ fn main() -> Result<()> {
                 println!("  leakage check (per-game cleaning):");
                 print_leakage(&lobbies, &model, &accounts);
             }
-            for (playlist, runs) in PLAYLISTS.iter().zip(&mut variant.runs_by_playlist) {
-                let playlist_lobbies = playlist_lobbies(&lobbies, playlist.players_per_team);
-                runs.push(score(&playlist_lobbies, &model, playlist.players_per_team));
+            for (playlist, runs) in TeamSize::all().zip(&mut variant.runs_by_playlist) {
+                let playlist_lobbies = playlist_lobbies(&lobbies, playlist.players_per_team());
+                runs.push(score(
+                    &playlist_lobbies,
+                    &model,
+                    playlist.players_per_team(),
+                ));
             }
         }
     }
@@ -275,8 +259,8 @@ fn main() -> Result<()> {
         "\nEvaluation split, mean over {} seeds (± half the seed range):",
         args.seeds.len()
     );
-    for (index, playlist) in PLAYLISTS.iter().enumerate() {
-        println!("  {}", playlist.name);
+    for (index, playlist) in TeamSize::all().enumerate() {
+        println!("  {}", playlist.name());
         for variant in &variants {
             if let Some(runs) = variant.runs_by_playlist.get(index) {
                 print_runs(&variant.name, runs);

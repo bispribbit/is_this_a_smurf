@@ -8,12 +8,13 @@
 
 use std::collections::{BTreeMap, HashSet};
 
+pub use replay_structs::{MATCH_STAT_COUNT, MatchStat};
 use replay_structs::{ParsedReplay, Team};
 
 mod match_stats;
 pub use match_stats::{
-    MATCH_STAT_COUNT, MATCH_STAT_NAMES, PLAYERS_PER_TEAM_STAT, PlayerMatchStats,
-    compute_player_match_stats, compute_player_window_stats, goal_windows, time_windows,
+    PlayerMatchStats, compute_player_match_stats, compute_player_window_stats, goal_windows,
+    time_windows,
 };
 
 /// Roster slots per team. Above the largest team size (3) because casual lobbies replace

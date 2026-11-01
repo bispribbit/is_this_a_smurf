@@ -7,7 +7,7 @@
 //! that tier (cleaned of likely smurfs). A player is above their lobby on a mechanic when
 //! their rate beats the lobby tier's high quantile.
 
-use feature_extractor::{MATCH_STAT_COUNT, MATCH_STAT_NAMES, TOTAL_SLOTS};
+use feature_extractor::{MATCH_STAT_COUNT, MatchStat, TOTAL_SLOTS};
 use serde::{Deserialize, Serialize};
 
 use crate::coaching::tier_index;
@@ -15,85 +15,69 @@ use crate::coaching::tier_index;
 /// Quantile of the lobby tier a mechanic rate must beat to count as far above it.
 pub const MECHANIC_HIGH_QUANTILE: f32 = 0.95;
 
+/// Times a per-minute mechanic must happen in the match to count.
+///
+/// In a short match (an early forfeit) one half flip in 97 seconds is already an SSL rate;
+/// two were enough to flag a Bronze for three "SSL" mechanics.
+pub const MINIMUM_MECHANIC_EVENTS: f32 = 3.0;
+
 /// One named mechanic: the stat that measures it and how the card names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Mechanic {
-    pub stat: &'static str,
+    pub stat: MatchStat,
     pub label: &'static str,
 }
 
 /// Mechanics checked against the lobby's tier, in [`MechanicTier`] order.
 pub const MECHANICS: &[Mechanic] = &[
     Mechanic {
-        stat: "fast_aerial_fraction",
+        stat: MatchStat::FastAerialFraction,
         label: "fast aerials",
     },
     Mechanic {
-        stat: "speed_flips_per_minute",
+        stat: MatchStat::SpeedFlipsPerMinute,
         label: "speed flips",
     },
     Mechanic {
-        stat: "half_flips_per_minute",
+        stat: MatchStat::HalfFlipsPerMinute,
         label: "half flips",
     },
     Mechanic {
-        stat: "wavedashes_per_minute",
+        stat: MatchStat::WavedashesPerMinute,
         label: "wavedashes",
     },
     Mechanic {
-        stat: "flip_resets_per_minute",
+        stat: MatchStat::TornadoSpinsPerMinute,
+        label: "tornado spins",
+    },
+    Mechanic {
+        stat: MatchStat::FlipResetsPerMinute,
         label: "flip resets",
     },
     Mechanic {
-        stat: "ceiling_touches_per_minute",
+        stat: MatchStat::CeilingTouchesPerMinute,
         label: "ceiling plays",
     },
     Mechanic {
-        stat: "dribble_fraction",
+        stat: MatchStat::DribbleFraction,
         label: "dribbles",
     },
     Mechanic {
-        stat: "flicks_per_minute",
+        stat: MatchStat::FlicksPerMinute,
         label: "flicks",
     },
     Mechanic {
-        stat: "air_dribble_touches_per_minute",
+        stat: MatchStat::AirDribbleTouchesPerMinute,
         label: "air dribbles",
     },
     Mechanic {
-        stat: "double_taps_per_minute",
+        stat: MatchStat::DoubleTapsPerMinute,
         label: "double taps",
     },
     Mechanic {
-        stat: "power_shots_per_minute",
+        stat: MatchStat::PowerShotsPerMinute,
         label: "power shots",
     },
-];
-
-/// Singular display name per tier index (0 = Bronze I … 21 = SSL).
-pub const TIER_SINGULARS: [&str; 22] = [
-    "Bronze I",
-    "Bronze II",
-    "Bronze III",
-    "Silver I",
-    "Silver II",
-    "Silver III",
-    "Gold I",
-    "Gold II",
-    "Gold III",
-    "Platinum I",
-    "Platinum II",
-    "Platinum III",
-    "Diamond I",
-    "Diamond II",
-    "Diamond III",
-    "Champ I",
-    "Champ II",
-    "Champ III",
-    "GC I",
-    "GC II",
-    "GC III",
-    "SSL",
 ];
 
 /// One tier's reference rates, aligned with [`MECHANICS`].
@@ -147,6 +131,17 @@ fn others_tier(match_mmr: &[Option<f32>; TOTAL_SLOTS], slot: usize) -> Option<us
     })
 }
 
+/// Drops per-minute mechanics the player did fewer than [`MINIMUM_MECHANIC_EVENTS`] times in
+/// `live_seconds` of play: a rate from one or two events says nothing.
+pub fn drop_rare_mechanics(evidence: &mut Vec<MechanicEvidence>, live_seconds: f32) {
+    let minutes = live_seconds / 60.0;
+    evidence.retain(|item| {
+        !item.mechanic.stat.name().ends_with("_per_minute")
+            // Rates are whole events over the minutes, so allow for rounding.
+            || item.rate.mul_add(minutes, 0.01) >= MINIMUM_MECHANIC_EVENTS
+    });
+}
+
 /// Per slot: the mechanics the player does more than the other players' tier's high
 /// quantile, highest typical tier first. Empty without a table or other scored players.
 #[must_use]
@@ -191,10 +186,7 @@ impl MechanicTable {
             .iter()
             .enumerate()
             .filter_map(|(index, mechanic)| {
-                let stat = MATCH_STAT_NAMES
-                    .iter()
-                    .position(|name| *name == mechanic.stat)?;
-                let rate = *stats.get(stat)?;
+                let rate = *stats.get(mechanic.stat.index())?;
                 let high = *reference.highs.get(index)?;
                 (rate > 0.0 && rate > high).then(|| MechanicEvidence {
                     mechanic,
@@ -227,10 +219,9 @@ impl MechanicTable {
 mod tests {
     use super::*;
 
-    fn stats_with(stat: &str, value: f32) -> Vec<f32> {
-        MATCH_STAT_NAMES
-            .iter()
-            .map(|name| if *name == stat { value } else { 0.0 })
+    fn stats_with(stat: MatchStat, value: f32) -> Vec<f32> {
+        MatchStat::all()
+            .map(|other| if other == stat { value } else { 0.0 })
             .collect()
     }
 
@@ -244,11 +235,46 @@ mod tests {
                 })
                 .collect(),
         };
-        let stats = stats_with("speed_flips_per_minute", 1.5);
+        let stats = stats_with(MatchStat::SpeedFlipsPerMinute, 1.5);
         let evidence = table.above_tier(&stats, 2);
         assert_eq!(evidence.len(), 1);
         assert_eq!(evidence[0].mechanic.label, "speed flips");
         assert_eq!(evidence[0].typical_tier, 15);
         assert_eq!(table.above_tier(&stats, 12).len(), 0);
+    }
+
+    #[test]
+    fn rare_per_minute_mechanics_are_dropped() {
+        let half_flips = MECHANICS
+            .iter()
+            .find(|mechanic| mechanic.stat == MatchStat::HalfFlipsPerMinute)
+            .expect("half flips are a mechanic");
+        let dribbles = MECHANICS
+            .iter()
+            .find(|mechanic| mechanic.stat == MatchStat::DribbleFraction)
+            .expect("dribbles are a mechanic");
+        let evidence = |rate: f32| {
+            vec![
+                MechanicEvidence {
+                    mechanic: half_flips,
+                    typical_tier: 21,
+                    rate,
+                },
+                MechanicEvidence {
+                    mechanic: dribbles,
+                    typical_tier: 21,
+                    rate: 0.004,
+                },
+            ]
+        };
+        // Two half flips in 97.5 seconds: dropped; the fraction stays.
+        let mut short = evidence(2.0 / 1.625);
+        drop_rare_mechanics(&mut short, 97.5);
+        assert_eq!(short.len(), 1);
+        assert_eq!(short[0].mechanic.label, "dribbles");
+        // Three in the same time: kept.
+        let mut enough = evidence(3.0 / 1.625);
+        drop_rare_mechanics(&mut enough, 97.5);
+        assert_eq!(enough.len(), 2);
     }
 }

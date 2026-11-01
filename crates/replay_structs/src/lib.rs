@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 mod game_mode;
 mod match_format;
+mod match_stat;
 mod math;
 mod rank;
 mod replay;
@@ -14,6 +15,7 @@ mod unsupported_match;
 
 pub use game_mode::*;
 pub use match_format::*;
+pub use match_stat::*;
 pub use math::*;
 pub use rank::*;
 pub use replay::*;
