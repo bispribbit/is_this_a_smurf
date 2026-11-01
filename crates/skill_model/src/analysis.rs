@@ -124,7 +124,16 @@ impl SkillModelBundle {
             let stats: &PlayerMatchStats = match_stats[slot].as_ref()?;
             coaching_table?.advise(match_mmr[slot]?, &stats.values)
         });
-        let timeline = self.timeline(parsed, &roster, &match_mmr);
+        // A player flagged for how they play is shown at the level they play like, so the
+        // timeline agrees with the flag instead of sitting at the lobby's rank.
+        let timeline_level: [Option<f32>; TOTAL_SLOTS] =
+            core::array::from_fn(|slot| match smurf[slot] {
+                Some(SmurfReason::PlaysAboveLobby | SmurfReason::DerankingAboveLobby) => {
+                    plays_like_mmr[slot].or(match_mmr[slot])
+                }
+                _ => match_mmr[slot],
+            });
+        let timeline = self.timeline(parsed, &roster, &timeline_level);
         MatchAnalysis {
             names: roster.names,
             match_mmr,
@@ -140,7 +149,7 @@ impl SkillModelBundle {
         &self,
         parsed: &ParsedReplay,
         roster: &PlayerRoster,
-        match_mmr: &[Option<f32>; TOTAL_SLOTS],
+        level: &[Option<f32>; TOTAL_SLOTS],
     ) -> Vec<PlayerTimeline> {
         let windows = time_windows(parsed, self.window_seconds);
         // Each window: every present player's deviation from that window's lobby, and how
@@ -168,7 +177,7 @@ impl SkillModelBundle {
         }
 
         // A player's average window deviation, so the timeline shows form around their own
-        // whole-match level rather than a second, competing estimate of it.
+        // `level` rather than a second, competing estimate of it.
         let average_deviation: [f32; TOTAL_SLOTS] = core::array::from_fn(|slot| {
             let mut weighted = 0.0;
             let mut total = 0.0;
@@ -187,9 +196,8 @@ impl SkillModelBundle {
             .map(|(frames, window)| PlayerTimeline {
                 frames,
                 player_mmr: core::array::from_fn(|slot| {
-                    let level = match_mmr[slot]?;
                     let form = window[slot]? - average_deviation[slot];
-                    Some(self.timeline_emphasis.mul_add(form, level))
+                    Some(self.timeline_emphasis.mul_add(form, level[slot]?))
                 }),
             })
             .collect()

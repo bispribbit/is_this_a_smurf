@@ -271,7 +271,9 @@ fn TeamSummaryCard(
                                     }
                                 }
                                 if let Some(roast) = &player.next_rank_roast {
-                                    p { class: "text-xs italic text-gray-400 leading-snug", "{roast}" }
+                                    p { class: "text-xs italic text-gray-400 leading-snug",
+                                        "{roast}"
+                                    }
                                 }
                             }
                             if let Some(reason) = player.smurf {
@@ -287,10 +289,11 @@ fn TeamSummaryCard(
                                 }
                             }
                             div { class: "shrink-0 flex flex-col items-end justify-center gap-1",
+                                // A smurf's icon is the rank they play like, as on their timeline.
                                 img {
-                                    src: rank_division_icon_asset(player.rank),
+                                    src: rank_division_icon_asset(player.plays_like.unwrap_or(player.rank)),
                                     alt: "",
-                                    title: player.rank.to_string(),
+                                    title: player.plays_like.unwrap_or(player.rank).to_string(),
                                     class: "block w-12 h-11 object-contain drop-shadow-md",
                                 }
                             }
