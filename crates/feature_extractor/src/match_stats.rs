@@ -13,7 +13,9 @@
 use std::collections::HashMap;
 use std::ops::Range;
 
-use replay_structs::{BallState, MATCH_STAT_COUNT, MatchStat, ParsedReplay, Quaternion, Vector3};
+use replay_structs::{
+    BallState, MATCH_STAT_COUNT, MatchStat, ParsedReplay, Quaternion, Team, Vector3,
+};
 
 use crate::{PlayerRoster, SLOTS_PER_TEAM, TOTAL_SLOTS, build_goal_replay_excluded_set};
 
@@ -101,6 +103,13 @@ const DRIBBLE_MAXIMUM_SPEED_DIFFERENCE: f32 = 300.0;
 const DRIBBLE_MINIMUM_CAR_SPEED: f32 = 300.0;
 /// Carry time before a dodge counts as a flick.
 const FLICK_MINIMUM_CARRY_SECONDS: f32 = 0.4;
+/// Seconds between the end of a carry and the dodge for it to still be a flick: the jump
+/// before the flip lifts the ball off the roof.
+const FLICK_MAXIMUM_SECONDS_AFTER_CARRY: f32 = 0.6;
+/// Speed (along the car) of a car driving backwards into a half flip.
+const HALF_FLIP_MINIMUM_REVERSE_SPEED: f32 = 300.0;
+/// Speed (along the nose) of a half flip that ended facing the way the car travels.
+const HALF_FLIP_MINIMUM_FORWARD_SPEED: f32 = 300.0;
 /// Two aerial touches by the same player this close together are an air dribble.
 const AIR_DRIBBLE_SECONDS: f32 = 1.0;
 /// Ball past this canonical y and above this height is on the opponents' backboard (the
@@ -154,6 +163,8 @@ struct TornadoSpin {
 struct PendingHalfFlip {
     seconds_left: f32,
     forward: HorizontalDirection,
+    /// Horizontal direction the car was travelling (backwards) when it flipped.
+    travel: HorizontalDirection,
 }
 
 /// Per-car state of the mechanics that span several frames.
@@ -166,6 +177,9 @@ struct MechanicsState {
     near_ball_since_surface: bool,
     half_flip: Option<PendingHalfFlip>,
     carrying_seconds: f32,
+    /// Length of the last finished carry and the seconds since it ended, for flicks.
+    last_carry_seconds: f32,
+    seconds_since_carry: Option<f32>,
     on_ceiling: bool,
     seconds_since_dodge: Option<f32>,
     /// This airborne stretch's landing has been judged.
@@ -183,6 +197,8 @@ struct LastTouch {
     aerial: bool,
     /// The ball reached the opponents' backboard since.
     off_backboard: bool,
+    /// Ball y when touched, for passes.
+    ball_y: f32,
 }
 
 /// A 50/50 waiting for its outcome.
@@ -279,7 +295,17 @@ struct Accumulator {
     last_back_goal_distance_defending: f64,
     overcommit: f64,
     opponent_possession_own_half: f64,
+    /// Time as the team's closest player to an opponent on the ball in the own half.
+    engaged_defending: f64,
     shadow_defense: f64,
+    kickoffs_taken: u32,
+    /// Sum over kickoffs taken of the approach speed, in units of supersonic speed.
+    kickoff_approach_speed: f64,
+    passes: u32,
+    redirects: u32,
+    wall_reads: u32,
+    shot_attempts: u32,
+    shots_on_target: u32,
     teammate_possession: f64,
     support_spacing: f64,
     recovery_touches: u32,
@@ -350,6 +376,66 @@ fn nose_direction(rotation: &Quaternion) -> Vector3 {
     }
 }
 
+/// Whether the ball is against a side wall, or a back wall outside the goal mouth, off the
+/// floor.
+fn ball_on_wall(ball: &Vector3) -> bool {
+    let in_goal_mouth = ball.x.abs() < GOAL_MOUTH_HALF_WIDTH && ball.z < GOAL_MOUTH_HEIGHT;
+    ball.z > BALL_WALL_MINIMUM_HEIGHT
+        && (ball.x.abs() > BALL_ON_SIDE_WALL_X
+            || (ball.y.abs() > BALL_ON_BACK_WALL_Y && !in_goal_mouth))
+}
+
+/// Where a ball's projected flight meets the back wall of the goal team `sign` attacks
+/// (canonical +y).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShotTarget {
+    /// Into the goal mouth.
+    OnTarget,
+    /// Aimed at goal (within the goal area) but wide or over: post, crossbar, side net.
+    Missed,
+}
+
+/// Follows the ball with gravity and bounces off the floor, side walls and ceiling until it
+/// reaches the attacked back wall. `None` when it does not get there within
+/// [`PROJECTION_MAXIMUM_STEPS`] or arrives outside the goal area (a clear, a pass).
+fn shot_target(position: &Vector3, velocity: &Vector3, sign: f32) -> Option<ShotTarget> {
+    let mut x = position.x;
+    let mut y = sign * position.y;
+    let mut z = position.z;
+    let mut velocity_x = velocity.x;
+    let velocity_y = sign * velocity.y;
+    let mut velocity_z = velocity.z;
+    if velocity_y <= 0.0 {
+        return None;
+    }
+    for _ in 0..PROJECTION_MAXIMUM_STEPS {
+        velocity_z = GRAVITY.mul_add(-PROJECTION_STEP_SECONDS, velocity_z);
+        x = velocity_x.mul_add(PROJECTION_STEP_SECONDS, x);
+        y = velocity_y.mul_add(PROJECTION_STEP_SECONDS, y);
+        z = velocity_z.mul_add(PROJECTION_STEP_SECONDS, z);
+        if z < BALL_RADIUS && velocity_z < 0.0 {
+            z = BALL_RADIUS;
+            velocity_z *= -BOUNCE_RESTITUTION;
+        }
+        if z > CEILING_Z - BALL_RADIUS && velocity_z > 0.0 {
+            velocity_z *= -BOUNCE_RESTITUTION;
+        }
+        if x.abs() > SIDE_WALL_X - BALL_RADIUS && x * velocity_x > 0.0 {
+            velocity_x *= -BOUNCE_RESTITUTION;
+        }
+        if y >= BACK_WALL_Y - BALL_RADIUS {
+            return if x.abs() < ON_TARGET_HALF_WIDTH && z < ON_TARGET_HEIGHT {
+                Some(ShotTarget::OnTarget)
+            } else if x.abs() < SHOT_AREA_HALF_WIDTH && z < SHOT_AREA_HEIGHT {
+                Some(ShotTarget::Missed)
+            } else {
+                None
+            };
+        }
+    }
+    None
+}
+
 /// Horizontal direction the car's nose points, or `None` when it points (nearly) straight
 /// up or down.
 fn horizontal_forward(rotation: &Quaternion) -> Option<HorizontalDirection> {
@@ -417,6 +503,8 @@ pub fn compute_player_window_stats(
     // Time of each player's last touch while waiting to see them get back goal-side.
     let mut pending_recovery: [Option<f32>; TOTAL_SLOTS] = [None; TOTAL_SLOTS];
     let mut last_touch: Option<LastTouch> = None;
+    // Per team (blue, orange): when the ball last came off a wall or backboard in its half.
+    let mut ball_off_own_wall: [Option<f32>; 2] = [None; 2];
     let mut pending_fifty_fifty: Option<PendingFiftyFifty> = None;
     // Time of the last bump between each pair of slots (bumper, bumped).
     let mut last_bump_time = [[f32::NEG_INFINITY; TOTAL_SLOTS]; TOTAL_SLOTS];
@@ -469,6 +557,7 @@ pub fn compute_player_window_stats(
             previous_ball_velocity = None;
             previous = [PreviousCarState::default(); TOTAL_SLOTS];
             last_touch = None;
+            ball_off_own_wall = [None; 2];
             pending_fifty_fifty = None;
             continue;
         }
@@ -711,6 +800,10 @@ pub fn compute_player_window_stats(
             }
         }
 
+        if ball_on_wall(&ball.position) {
+            // The half the ball is in: that team's own wall or backboard.
+            ball_off_own_wall[usize::from(ball.position.y > 0.0)] = Some(frame.time);
+        }
         if let Some(touch) = last_touch.as_mut()
             && team_sign(touch.slot) * ball.position.y > BACKBOARD_Y
             && ball.position.z > BACKBOARD_MINIMUM_HEIGHT
@@ -774,6 +867,44 @@ pub fn compute_player_window_stats(
                     let aerial = ball.position.z > HIGH_AIR_HEIGHT
                         && closest.position.z > GROUND_HEIGHT
                         && !closest.on_wall;
+                    let team = usize::from(closest.slot >= SLOTS_PER_TEAM);
+                    if let Some(last) = last_touch
+                        && last.slot != closest.slot
+                        && (last.slot >= SLOTS_PER_TEAM) == (closest.slot >= SLOTS_PER_TEAM)
+                    {
+                        let elapsed = frame.time - last.time;
+                        if elapsed < PASS_SECONDS
+                            && sign * (ball.position.y - last.ball_y) > 0.0
+                            && let Some(passer) = accumulators.get_mut(last.slot)
+                        {
+                            passer.passes += 1;
+                        }
+                        if elapsed < REDIRECT_SECONDS
+                            && speed_after >= REDIRECT_MINIMUM_BALL_SPEED
+                            && shot_target(&ball.position, &ball.velocity, sign)
+                                == Some(ShotTarget::OnTarget)
+                            && let Some(receiver) = accumulators.get_mut(closest.slot)
+                        {
+                            receiver.redirects += 1;
+                        }
+                    }
+                    if ball_off_own_wall[team]
+                        .is_some_and(|time| frame.time - time < WALL_READ_SECONDS)
+                        && sign * ball.velocity.y > 0.0
+                        && let Some(accumulator) = accumulators.get_mut(closest.slot)
+                    {
+                        accumulator.wall_reads += 1;
+                        ball_off_own_wall[team] = None;
+                    }
+                    let Some(accumulator) = accumulators.get_mut(closest.slot) else {
+                        continue;
+                    };
+                    if speed_after >= SHOT_MINIMUM_BALL_SPEED
+                        && let Some(target) = shot_target(&ball.position, &ball.velocity, sign)
+                    {
+                        accumulator.shot_attempts += 1;
+                        accumulator.shots_on_target += u32::from(target == ShotTarget::OnTarget);
+                    }
                     if let Some(last) = last_touch
                         && last.slot == closest.slot
                         && ball.position.z > HIGH_AIR_HEIGHT
@@ -790,6 +921,7 @@ pub fn compute_player_window_stats(
                         time: frame.time,
                         aerial,
                         off_backboard: false,
+                        ball_y: ball.position.y,
                     });
                     touched = true;
                 }
@@ -1149,7 +1281,19 @@ fn accumulate_multi_frame_mechanics(
         accumulator.speed_flips += 1;
     }
 
-    // Half flips: a back flip off the ground after which the car faces the other way.
+    // Half flips: driving backwards, a back flip, and the car comes out facing the way it
+    // travels. A back flip and a slow turn afterwards (common at low rank) is not one.
+    let horizontal_speed = state.velocity.x.hypot(state.velocity.y);
+    let travel = (horizontal_speed > 1.0).then(|| HorizontalDirection {
+        x: state.velocity.x / horizontal_speed,
+        y: state.velocity.y / horizontal_speed,
+    });
+    let speed_along = |direction: HorizontalDirection| {
+        state
+            .velocity
+            .x
+            .mul_add(direction.x, state.velocity.y * direction.y)
+    };
     let mut half_flip = previous
         .half_flip
         .map(|pending| PendingHalfFlip {
@@ -1164,6 +1308,8 @@ fn accumulate_multi_frame_mechanics(
             .x
             .mul_add(pending.forward.x, forward.y * pending.forward.y)
             < TURNED_AROUND_DOT
+        && speed_along(forward) > HALF_FLIP_MINIMUM_FORWARD_SPEED
+        && speed_along(pending.travel) > HALF_FLIP_MINIMUM_FORWARD_SPEED
     {
         accumulator.half_flips += 1;
         half_flip = None;
@@ -1171,12 +1317,15 @@ fn accumulate_multi_frame_mechanics(
     if dodge_started
         && height < LOW_DODGE_MAXIMUM_HEIGHT
         && pitch < 0.0
-        && pitch.abs() > DOMINANT_TORQUE_RATIO * roll.abs()
+        && pitch.abs() > roll.abs()
         && let Some(forward) = forward
+        && let Some(travel) = travel
+        && speed_along(forward) < -HALF_FLIP_MINIMUM_REVERSE_SPEED
     {
         half_flip = Some(PendingHalfFlip {
             seconds_left: HALF_FLIP_SECONDS,
             forward,
+            travel,
         });
     }
 
@@ -1196,9 +1345,25 @@ fn accumulate_multi_frame_mechanics(
     } else {
         0.0
     };
-    if dodge_started
-        && previous.carrying_seconds.max(carrying_seconds) > FLICK_MINIMUM_CARRY_SECONDS
-    {
+    // The jump before a flick lifts the ball off the roof, so the carry has usually just
+    // ended when the dodge starts.
+    let carry_ended = !carrying && previous.carrying_seconds > 0.0;
+    let last_carry_seconds = if carry_ended {
+        previous.carrying_seconds
+    } else {
+        previous.last_carry_seconds
+    };
+    let seconds_since_carry = if carrying {
+        None
+    } else if carry_ended {
+        Some(0.0)
+    } else {
+        previous.seconds_since_carry.map(|since| since + seconds)
+    };
+    let recently_carried = seconds_since_carry
+        .is_some_and(|since| since < FLICK_MAXIMUM_SECONDS_AFTER_CARRY)
+        && last_carry_seconds > FLICK_MINIMUM_CARRY_SECONDS;
+    if dodge_started && (carrying_seconds > FLICK_MINIMUM_CARRY_SECONDS || recently_carried) {
         accumulator.flicks += 1;
     }
 
@@ -1208,6 +1373,8 @@ fn accumulate_multi_frame_mechanics(
         near_ball_since_surface,
         half_flip,
         carrying_seconds,
+        last_carry_seconds,
+        seconds_since_carry,
         on_ceiling,
         seconds_since_dodge: if dodge_started {
             Some(0.0)
@@ -1232,7 +1399,51 @@ const DOUBLE_COMMIT_DISTANCE: f32 = 600.0;
 /// Seconds after a touch within which getting back goal-side counts as a recovery.
 const RECOVERY_SECONDS: f32 = 3.0;
 /// Maximum distance to the ball for goal-side defending to count as shadowing.
-const SHADOW_DISTANCE: f32 = 1500.0;
+const SHADOW_DISTANCE: f32 = 2000.0;
+/// Speed toward the own goal of a defender backing off an attacker rather than diving in.
+const SHADOW_MINIMUM_RETREAT_SPEED: f32 = 200.0;
+/// A teammate's touch this soon after a player's touch, with the ball moved upfield,
+/// makes the first touch a pass.
+const PASS_SECONDS: f32 = 2.0;
+/// A touch on goal this soon after a teammate's touch is a redirect.
+const REDIRECT_SECONDS: f32 = 1.5;
+/// Ball speed of a redirect: a real hit, not a deflection.
+const REDIRECT_MINIMUM_BALL_SPEED: f32 = 1500.0;
+/// Ball speed of a touch that can be a shot.
+const SHOT_MINIMUM_BALL_SPEED: f32 = 1000.0;
+/// Where a shot's projected flight meets the back wall: inside the goal mouth (ball centre
+/// a margin inside the posts and crossbar) it is on target; inside the wider goal area
+/// (about twice the mouth) it was aimed at goal and missed; farther out it was not a shot.
+const ON_TARGET_HALF_WIDTH: f32 = 840.0;
+const ON_TARGET_HEIGHT: f32 = 590.0;
+const SHOT_AREA_HALF_WIDTH: f32 = 1800.0;
+const SHOT_AREA_HEIGHT: f32 = 1300.0;
+/// Flight projection: gravity, the ball's radius, the bounce kept off the floor, walls and
+/// ceiling, the step and the longest flight followed.
+const GRAVITY: f32 = 650.0;
+const BALL_RADIUS: f32 = 93.0;
+const BOUNCE_RESTITUTION: f32 = 0.6;
+const SIDE_WALL_X: f32 = 4096.0;
+const CEILING_Z: f32 = 2044.0;
+const PROJECTION_STEP_SECONDS: f32 = 1.0 / 60.0;
+/// Four seconds of flight.
+const PROJECTION_MAXIMUM_STEPS: usize = 240;
+/// The ball within this of a side wall, or of a back wall outside the goal mouth, is off
+/// a wall (ball radius 93 + margin; the side walls are at ±4096, the back walls ±5120).
+const BALL_ON_SIDE_WALL_X: f32 = 3950.0;
+const BALL_ON_BACK_WALL_Y: f32 = 4975.0;
+/// Goal mouth half-width and height (with the ball's radius).
+const GOAL_MOUTH_HALF_WIDTH: f32 = 893.0;
+const GOAL_MOUTH_HEIGHT: f32 = 642.0;
+/// Ball height above which wall contact is a wall or backboard ball, not a roll.
+const BALL_WALL_MINIMUM_HEIGHT: f32 = 150.0;
+/// A clear this soon after the ball came off a wall or backboard in the player's own half
+/// is a wall read.
+const WALL_READ_SECONDS: f32 = 1.5;
+/// Car speed at which a kickoff taker has started moving.
+const KICKOFF_MOVING_SPEED: f32 = 100.0;
+/// The back walls, where the goal lines are.
+const BACK_WALL_Y: f32 = 5120.0;
 /// Distance band to the ball that counts as useful support while a teammate has it.
 const SUPPORT_MINIMUM_DISTANCE: f32 = 800.0;
 const SUPPORT_MAXIMUM_DISTANCE: f32 = 3000.0;
@@ -1300,8 +1511,14 @@ fn accumulate_situational(
                 }
                 if opponents_have_ball {
                     accumulator.opponent_possession_own_half += seconds;
-                    if goal_side && car.distance_to_ball < SHADOW_DISTANCE {
-                        accumulator.shadow_defense += seconds;
+                    // Shadowing: the defender facing the attacker stays goal-side and backs
+                    // off toward the own goal instead of diving in.
+                    if closest_on_team == Some(car.slot) {
+                        accumulator.engaged_defending += seconds;
+                        let retreating = sign * car.velocity.y < -SHADOW_MINIMUM_RETREAT_SPEED;
+                        if goal_side && car.distance_to_ball < SHADOW_DISTANCE && retreating {
+                            accumulator.shadow_defense += seconds;
+                        }
                     }
                 }
             }
@@ -1395,6 +1612,7 @@ fn accumulate_kickoffs(
             .iter()
             .skip(touch_index)
             .find(|frame| frame.time - touch_frame.time >= KICKOFF_OUTCOME_SECONDS);
+        accumulate_kickoff_approaches(accumulators, parsed, slot_by_name, kickoff, touch_index);
         if let Some(accumulator) = accumulators.get_mut(slot) {
             accumulator.kickoff_first_touches += 1;
             if let Some(outcome) = outcome_frame {
@@ -1404,6 +1622,71 @@ fn accumulate_kickoffs(
         }
     }
     kickoffs
+}
+
+/// Each team's kickoff taker (its car closest to the ball at the first touch): distance
+/// covered toward the ball from when they started moving to the first touch, over that
+/// time, in units of supersonic speed. A speed flip or a fast flip gets there faster from the same spawn.
+fn accumulate_kickoff_approaches(
+    accumulators: &mut [Accumulator; TOTAL_SLOTS],
+    parsed: &ParsedReplay,
+    slot_by_name: &HashMap<&str, usize>,
+    kickoff: usize,
+    touch_index: usize,
+) {
+    let Some(touch_frame) = parsed.frames.get(touch_index) else {
+        return;
+    };
+    for team in [Team::Blue, Team::Orange] {
+        let taker = touch_frame
+            .players
+            .iter()
+            .filter(|player| player.team == team && !player.actor_state.is_demolished)
+            .min_by(|a, b| {
+                distance(&a.actor_state.position, &touch_frame.ball.position).total_cmp(&distance(
+                    &b.actor_state.position,
+                    &touch_frame.ball.position,
+                ))
+            });
+        let Some(taker) = taker else {
+            continue;
+        };
+        let Some(&slot) = slot_by_name.get(taker.name.as_str()) else {
+            continue;
+        };
+        let start = parsed
+            .frames
+            .iter()
+            .take(touch_index)
+            .skip(kickoff)
+            .find_map(|frame| {
+                frame
+                    .players
+                    .iter()
+                    .find(|player| player.name == taker.name)
+                    .filter(|player| length(&player.actor_state.velocity) > KICKOFF_MOVING_SPEED)
+                    .map(|player| {
+                        (
+                            frame.time,
+                            distance(&player.actor_state.position, &frame.ball.position),
+                        )
+                    })
+            });
+        let Some((start_time, start_distance)) = start else {
+            continue;
+        };
+        let seconds = touch_frame.time - start_time;
+        if seconds <= 0.0 {
+            continue;
+        }
+        // Distance covered toward the ball: the taker who did not touch first is not there yet.
+        let covered =
+            start_distance - distance(&taker.actor_state.position, &touch_frame.ball.position);
+        if let Some(accumulator) = accumulators.get_mut(slot) {
+            accumulator.kickoffs_taken += 1;
+            accumulator.kickoff_approach_speed += f64::from(covered / seconds / SUPERSONIC_SPEED);
+        }
+    }
 }
 
 /// Per-frame team roles: closest to ball, last back, most forward, nearest-teammate spacing.
@@ -1629,10 +1912,9 @@ fn finish(
             ) / 7245.0
         }
         MatchStat::OvercommitFraction => fraction(accumulator.overcommit),
-        MatchStat::ShadowDefenseFraction => ratio(
-            accumulator.shadow_defense,
-            accumulator.opponent_possession_own_half,
-        ),
+        MatchStat::ShadowDefenseFraction => {
+            ratio(accumulator.shadow_defense, accumulator.engaged_defending)
+        }
         MatchStat::SupportSpacingFraction => {
             ratio(accumulator.support_spacing, accumulator.teammate_possession)
         }
@@ -1675,6 +1957,17 @@ fn finish(
         MatchStat::LandingSpeedKeptFraction => ratio(
             accumulator.landing_speed_kept,
             f64::from(accumulator.landings_with_speed),
+        ),
+        MatchStat::KickoffApproachSpeed => ratio(
+            accumulator.kickoff_approach_speed,
+            f64::from(accumulator.kickoffs_taken),
+        ),
+        MatchStat::PassesPerMinute => per_minute(f64::from(accumulator.passes)),
+        MatchStat::RedirectsPerMinute => per_minute(f64::from(accumulator.redirects)),
+        MatchStat::WallReadsPerMinute => per_minute(f64::from(accumulator.wall_reads)),
+        MatchStat::ShotAccuracy => ratio(
+            f64::from(accumulator.shots_on_target),
+            f64::from(accumulator.shot_attempts),
         ),
         MatchStat::PlayersPerTeam => players_per_team as f32,
     };
@@ -2153,6 +2446,9 @@ mod situational_tests {
             ],
             demolitions: Vec::new(),
         };
+        let mut frame = frame;
+        // b1 backs off toward its goal: shadowing, not diving in.
+        frame.players[1].actor_state.velocity.y = -500.0;
         let parsed = ParsedReplay {
             frames: vec![frame; 60],
             ..ParsedReplay::default()

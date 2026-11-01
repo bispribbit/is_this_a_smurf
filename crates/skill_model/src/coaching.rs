@@ -222,6 +222,12 @@ pub const COACHING_TIPS: &[CoachingTip] = &[
         unit: Unit::Percent,
         lines: lines::CLEAN_LANDING_FRACTION,
     },
+    CoachingTip {
+        stat: MatchStat::ShotAccuracy,
+        better: Better::Higher,
+        unit: Unit::Percent,
+        lines: lines::SHOT_ACCURACY,
+    },
 ];
 
 /// Lines for a player with nothing left to learn from the rank above (or already SSL).

@@ -660,6 +660,31 @@ pub(super) const CLEAN_LANDING_FRACTION: &[&str] = &[
     "{yours} clean. {next}: {theirs}. {name}'s car spends its landings looking at the sky.",
 ];
 
+pub(super) const SHOT_ACCURACY: &[&str] = &[
+    "{yours} of {name}'s shots were on target. {next}: {theirs}. The net is the rectangle, not the wall around it.",
+    "Shot accuracy {yours}. {next}: {theirs}. {name} keeps hitting the crossbar on purpose, apparently.",
+    "{next} put {theirs} of their shots on net. {name}: {yours}. Side netting is not a goal.",
+    "{yours} on target. {next}: {theirs}. {name} shoots like the goal moved.",
+    "{name} hit the target {yours} of the time, {next} {theirs}. The keeper had the night off and still won.",
+    "{yours} of the shots on net. {next}: {theirs}. {name} aims for the top of the net, the outside part.",
+    "{next} hit the target {theirs}. {name}: {yours}. Open nets fear nothing from {name}.",
+    "Shots on target: {yours}. {next}: {theirs}. {name} is a menace to the back wall.",
+    "{yours} accuracy. {next}: {theirs}. {name} finds the post more often than the net.",
+    "{name} put {yours} of their shots on frame. {next}: {theirs}. The crowd behind the goal says thanks for the souvenirs.",
+    "{next} shoot on target {theirs} of the time. {name}: {yours}. Aiming is a mechanic too.",
+    "{yours} on net. {next}: {theirs}. {name}'s shots have a strong opinion about the corner flag.",
+    "Accuracy {yours}, {next} {theirs}. {name} shoots first and aims never.",
+    "{yours} of {name}'s shots were going in. {next}: {theirs}. The rest were decorating the backboard.",
+    "{next}: {theirs} on target. {name}: {yours}. Power without aim is just a clear.",
+    "{name} hits the net {yours} of the time, {next} {theirs}. Close only counts in horseshoes.",
+    "{yours} of shots on frame. {next}: {theirs}. {name} could miss the ocean from a boat.",
+    "{next} hit the net {theirs} of the time. {name}: {yours}. The goal is 1786 wide and {name} still found the outside.",
+    "Shot accuracy {yours}. {next}: {theirs}. {name}'s best assist was to the opponent's goal kick.",
+    "{yours} on target, {next} {theirs}. {name} treats the crossbar as the target.",
+    "{name}: {yours} of shots on net. {next}: {theirs}. Every miss is a free clear for the other team.",
+    "{next} put {theirs} on frame. {name}: {yours}. Hitting the ball hard is half the job.",
+];
+
 /// Lines for a player with nothing left to learn from the rank above (or already SSL).
 pub(super) const NOTHING_TO_FIX: &[&str] = &[
     "Honestly? Nothing to fix. Suspicious.",

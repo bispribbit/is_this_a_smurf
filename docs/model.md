@@ -13,14 +13,16 @@ One file, `data/skill_model.bin` (~2.4 MB, see [Bundle format](#bundle-format)),
 | **Plays-like models** | each player's own stats, one model per stat group (aerial, ground, speed and boost, named mechanics) | the rank they play like | smurf badge, verdict |
 | **Mechanics table** | per-rank 95th percentiles of 11 named mechanics | the mechanics a player does far above their lobby | smurf badge, card |
 | **Window model** | the same stats over 60 s of live play | one MMR per player per minute | the timeline |
-| **Coaching table** | per-rank medians of 20 actionable stats | one roast per player | the line under each card |
+| **Coaching table** | per-rank medians of 21 actionable stats | one roast per player | the line under each card |
 
 Everything runs in the browser in a fraction of a second; there is no neural network.
 
 ### 1. Per-player stats (`crates/feature_extractor`)
 
+[`features.md`](features.md) measures how each stat relates to rank on the full dataset.
+
 `compute_player_match_stats` reads every live frame (goal replays skipped) and summarises each
-player in **94 numbers**, all measured from that player's own side of the field, plus the
+player in **98 numbers**, all measured from that player's own side of the field, plus the
 playlist's team size (`players_per_team`, see [Playlists](#playlists)):
 
 - **movement** — speed, supersonic / slow time, ground / air / wall time, jumps
@@ -33,16 +35,24 @@ playlist's team size (`players_per_team`, see [Playlists](#playlists)):
   rather than the roof or side) and the momentum kept through them (horizontal speed 0.4 s
   after landing over the speed at touchdown)
 - **scoreboard** — in-game score, assists, saves, shots
-- **named mechanics** — speed flips, half flips, wavedashes, tornado spins (half a second of
+- **named mechanics** — speed flips, half flips (driving backwards into a back flip and
+  coming out facing the way the car travels), wavedashes, tornado spins (half a second of
   fast, boosting air roll with the nose held steady), flip resets, ceiling touches,
   dribbles and flicks, air dribbles, double taps, wall and flip touches, power shots,
   50/50s and their win rate, bumps inflicted / received, teammate bumps
-- **plays** — demos inflicted, kickoff first touches and wins, double commits
+- **plays** — demos inflicted, kickoff first touches and wins, kickoff approach speed (the
+  kickoff taker's distance covered toward the ball per second, which a speed flip raises),
+  double commits, passes (a teammate's next touch within 2 s with the ball moved upfield),
+  redirects (an on-target hit within 1.5 s of a teammate's touch), wall reads (a clear
+  within 1.5 s of the ball coming off a wall or backboard in the own half) and shot accuracy
+  (of the touches whose projected flight, with gravity and bounces, reaches the goal area,
+  the share heading into the goal mouth)
 - **throwing** — own goals, lost by forfeit, and forfeited while level or ahead on goals
   (the header's `bForfeit`, and the winner from `WinningTeam` or the recorder's
   "Win" / "Loss" replay name)
 - **situational positioning** — last back / goal-side *while defending*, overcommitting,
-  shadow defence, support spacing, getting back after a touch
+  shadow defence (as the closest defender to an attacker, goal-side and backing off toward
+  the own goal), support spacing, getting back after a touch
 
 ### 2. Gradient-boosted trees (`crates/skill_model`, trained by `crates/skill_model_training`)
 
@@ -276,10 +286,10 @@ replays), which no part of training sees. Labels are account ranks at match time
 
 | Metric | Meaning | Duels | Doubles | Standard |
 |---|---|---|---|---|
-| player RMSE | whole-match error per player | 178 | 115 | **102** |
-| lobby RMSE | error of the lobby's average | 177 | 107 | **90** |
-| within_r | correlation of predicted vs true *gaps to the lobby* (0 = no signal) | 0.29 | 0.39 | **0.54** |
-| concordance | share of lobbymate pairs (>25 MMR apart) ordered correctly (0.5 = chance) | 0.65 | 0.71 | **0.65** |
+| player RMSE | whole-match error per player | 175 | 111 | **101** |
+| lobby RMSE | error of the lobby's average | 174 | 102 | **89** |
+| within_r | correlation of predicted vs true *gaps to the lobby* (0 = no signal) | 0.23 | 0.38 | **0.53** |
+| concordance | share of lobbymate pairs (>25 MMR apart) ordered correctly (0.5 = chance) | 0.58 | 0.72 | **0.65** |
 
 Duels and doubles are scored on 400 to 800 players, so their within_r carries ±0.05; over
 three seeds duels within_r is 0.23 ± 0.05 (`compare_stat_sets`).
